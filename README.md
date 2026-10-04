@@ -4,6 +4,19 @@ Vibe Coding Inspector inspects a running web app, and optionally its source code
 and compliance issues. Every finding is backed by evidence a reviewer can check: where it is, what was checked, and
 the exact excerpt that was observed.
 
+## Views
+
+| View | What it is for |
+| --- | --- |
+| **Overview** | What the inspector does, how to use it, what each module checks, modes and safety. |
+| **Launch** | Enter the target and start a scan; a live monitor shows each module's progress, elapsed time and the step currently running. A "Scanning n/4" chip in the header (and a spinner on the Launch tab) shows progress from every view, and starts/finishes are announced to screen readers. |
+| **Analytics** | What was actually done: scan parameters, a filterable activity timeline of every HTTP request, every check with its result and every command (`npm audit`) with its exit code and output, coverage per module, and a network table. The log can be downloaded. |
+| **Findings** | A summary (observed vs. hypotheses, review progress, per module), every observation with its artifacts (captured excerpt, the request it came from, the check that was run) and a "Trace in Analytics" link to the activity that produced it, review controls, and report export. |
+
+Views are hash routes (`#/overview`, `#/launch`, `#/analytics`, `#/findings`), so Back/Forward and bookmarks work. The
+current scan, the launch form and the findings selection survive switching views and reloading. On phones the views
+become a bottom tab bar.
+
 ## What it does
 
 - crawls a target URL in **authorised localhost** mode (can also read a local repository) or **public read-only** mode
@@ -77,14 +90,18 @@ npm run build                # type-check + production build
 
 - `backend/app.py`: FastAPI service, request validation, Markdown/JSON report rendering
 - `backend/orchestrator.py`: scan store, concurrent module execution, coverage reports, deduplication
-- `backend/context.py`: per-scan shared state (one crawl, one repository index, single-flight HTTP cache)
+- `backend/context.py`: per-scan shared state (one crawl, one repository index, single-flight HTTP cache) and the
+  activity recorder
 - `backend/analyzers/web.py`: HTTP fetcher (each URL fetched once per scan) and breadth-first, concurrent crawler
 - `backend/analyzers/repo.py`: repository index that skips vendor/build directories and large or binary files
 - `backend/analyzers/common.py`: finding factory and evidence formatting shared by all modules
 - `backend/analyzers/{runtime,static_analysis,security,compliance}.py`: the four modules
-- `src/App.tsx`: page layout; `src/components/`: panels and shared UI primitives (`ui.tsx`)
+- `src/App.tsx`: app shell (header, view navigation, live announcements, state that outlives a view)
+- `src/views/`: the four views; `src/components/`: panels (scan monitor, activity log, network table, findings) and
+  shared UI primitives (`ui.tsx`)
+- `src/hooks/useHashRoute.ts`: view routing; `src/hooks/useScan.ts`: polling that applies status, activity and findings
+  together and stops when the scan completes
 - `src/lib/settings.tsx`: settings model, persistence and appearance; `src/lib/meta.ts`: labels, icons, formatting
-- `src/hooks/useScan.ts`: polling that stops when the scan completes
 - `src/api/client.ts`: the single frontend API adapter; `src/contracts/finding.ts`: mirrors `backend/schemas.py`
 
 ## API
@@ -92,12 +109,17 @@ npm run build                # type-check + production build
 - `POST /api/scans` — `{target_url, repo_path?, authorization_confirmed, inspection_mode, max_pages?, timeout_seconds?}`
 - `GET /api/scans/{scan_id}` — status, options, per-module reports (`modules`) and summary counts
 - `GET /api/scans/{scan_id}/findings`
+- `GET /api/scans/{scan_id}/activity?since=<seq>` — events after `seq`: requests, checks, commands and their output
 - `PATCH /api/findings/{finding_id}/review` — reason required for `rejected` / `escalated`
 - `PATCH /api/findings/{finding_id}/fix-review` — `approved` requires a confirmed finding
 - `GET /api/scans/{scan_id}/report?format=markdown|json` — `text/markdown` or `application/json`
 
 Each finding's `evidence` contains `snippet` (the observed excerpt), `captured_output` (how it was obtained, e.g. the
 request and response status), `check` (the rule that was evaluated) and `occurrences`.
+
+Activity events are bounded (message, output and URL lengths, plus a per-scan size budget; anything beyond is counted as
+`dropped`) and credential-shaped values, including secret-looking URL query parameters, are masked before they are
+stored, so they never reach the UI, the downloaded log or the reports. Recording activity can never fail a scan.
 
 ## Create a new GitHub repository and push
 

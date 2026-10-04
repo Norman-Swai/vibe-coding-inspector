@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import codecs
+import logging
 import re
 import threading
 import time
@@ -19,6 +20,8 @@ from requests.structures import CaseInsensitiveDict
 from ..schemas import ActivityKind
 from .common import ScanError, plural, start_tag
 
+logger = logging.getLogger(__name__)
+
 USER_AGENT = 'VibeCodingInspector/0.2 (+passive inspection)'
 MAX_BODY_BYTES = 2_000_000
 CRAWL_WORKERS = 4
@@ -35,6 +38,8 @@ class FetchResult:
     set_cookies: List[str] = field(default_factory=list)
     redirects: List[str] = field(default_factory=list)
     text: str = ''
+    # Bytes actually received (text bodies) or the declared Content-Length (other types); None if unknown.
+    size_bytes: Optional[int] = None
     truncated: bool = False
     elapsed_ms: int = 0
     error: Optional[str] = None
@@ -92,7 +97,11 @@ class PageFetcher:
                 raise
             future.set_result(result)
             if self._on_result is not None:
-                self._on_result(result)
+                # Observers (the activity log) must never be able to break fetching or the analysis that depends on it.
+                try:
+                    self._on_result(result)
+                except Exception:  # noqa: BLE001
+                    logger.exception('Request observer failed for %s', url)
             if result.url != url:
                 with self._lock:
                     self._cache.setdefault(result.url, future)
@@ -136,11 +145,24 @@ class PageFetcher:
                         if len(body) >= MAX_BODY_BYTES:
                             result.truncated = True
                             break
-                    result.text = bytes(body).decode(_charset(response.headers.get('content-type', '')), errors='replace')
+                    result.size_bytes = len(body)
+                    result.text = _decode(bytes(body), response.headers.get('content-type', ''))
+                else:
+                    declared = response.headers.get('content-length', '')
+                    result.size_bytes = int(declared) if re.fullmatch(r'[0-9]{1,15}', declared) else None
         except requests.RequestException as exc:
             result = FetchResult(requested_url=url, url=url, error=describe_request_error(exc, self.timeout))
         result.elapsed_ms = int((time.perf_counter() - started) * 1000)
         return result
+
+
+def _decode(body: bytes, content_type: str) -> str:
+    try:
+        text = body.decode(_charset(content_type), errors='replace')
+    except Exception:  # noqa: BLE001 - exotic codecs named by the server; fall back to UTF-8
+        text = body.decode('utf-8', errors='replace')
+    # Codecs such as utf-7 can produce lone surrogates, which cannot be re-encoded or serialised to JSON.
+    return text.encode('utf-8', errors='replace').decode('utf-8')
 
 
 def _charset(content_type: str) -> str:

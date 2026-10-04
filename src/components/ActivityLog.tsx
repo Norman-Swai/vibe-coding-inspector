@@ -1,18 +1,23 @@
 import { Download, ScrollText, Search } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { ActivityEvent, ActivityKind, ModuleName } from '../contracts/finding';
+import type { ActivityEvent, ModuleName } from '../contracts/finding';
 import { ACTIVITY_KIND_META, formatOffset, MODULE_META, MODULES, redactSecrets, SHARED_SOURCE_LABEL } from '../lib/meta';
 import { EmptyState, Panel, SegmentedControl } from './ui';
 
 type KindFilter = 'all' | 'request' | 'check' | 'command' | 'problem';
 type SourceFilter = 'all' | 'shared' | ModuleName;
 
-const KIND_FILTERS: Record<KindFilter, (kind: ActivityKind) => boolean> = {
+/** Commands are logged as "$ <command> → …"; a failed run is an error event but is still a command. */
+export function isCommand(event: ActivityEvent) {
+  return event.kind === 'command' || event.message.startsWith('$ ');
+}
+
+const KIND_FILTERS: Record<KindFilter, (event: ActivityEvent) => boolean> = {
   all: () => true,
-  request: (kind) => kind === 'request',
-  check: (kind) => kind === 'check',
-  command: (kind) => kind === 'command',
-  problem: (kind) => kind === 'warning' || kind === 'error',
+  request: (event) => event.kind === 'request',
+  check: (event) => event.kind === 'check',
+  command: isCommand,
+  problem: (event) => event.kind === 'warning' || event.kind === 'error',
 };
 
 export function sourceLabel(module: ModuleName | null) {
@@ -22,7 +27,7 @@ export function sourceLabel(module: ModuleName | null) {
 export function activityAsText(events: ActivityEvent[]) {
   return events
     .map((event) => {
-      const head = `${formatOffset(event.at_ms).padStart(9)}  ${sourceLabel(event.module).padEnd(15)} ${event.kind.padEnd(8)} ${event.message}`;
+      const head = `${formatOffset(event.at_ms).padStart(9)}  ${sourceLabel(event.module).padEnd(15)} ${event.kind.padEnd(8)} ${redactSecrets(event.message)}`;
       const output = event.output ? `\n${redactSecrets(event.output).replace(/^/gm, '             │ ')}` : '';
       return head + output;
     })
@@ -57,6 +62,7 @@ export function ActivityLog({
   const [query, setQuery] = useState(initialQuery);
   const listRef = useRef<HTMLOListElement>(null);
   const followRef = useRef(true);
+  const wasRunning = useRef(running);
 
   useEffect(() => setQuery(initialQuery), [initialQuery]);
 
@@ -64,17 +70,19 @@ export function ActivityLog({
     () =>
       events.filter(
         (event) =>
-          KIND_FILTERS[kind](event.kind) &&
+          KIND_FILTERS[kind](event) &&
           (source === 'all' || (source === 'shared' ? event.module === null : event.module === source)) &&
           matches(event, query.trim()),
       ),
     [events, kind, source, query],
   );
 
-  // Keep the newest event in view while the scan runs, unless the reader has scrolled up.
+  // Keep the newest event in view while the scan runs (including the final batch that arrives with completion),
+  // unless the reader has scrolled up.
   useLayoutEffect(() => {
     const list = listRef.current;
-    if (list && running && followRef.current) list.scrollTop = list.scrollHeight;
+    if (list && (running || wasRunning.current) && followRef.current) list.scrollTop = list.scrollHeight;
+    wasRunning.current = running;
   }, [visible.length, running]);
 
   const filtered = kind !== 'all' || source !== 'all' || query.trim() !== '';
@@ -127,7 +135,14 @@ export function ActivityLog({
       {events.length === 0 ? (
         <EmptyState icon={ScrollText} title={running ? 'Waiting for the first events…' : 'No activity recorded'} />
       ) : visible.length === 0 ? (
-        <EmptyState icon={ScrollText} title="No events match these filters" />
+        kind === 'command' && !events.some(isCommand) ? (
+          <EmptyState icon={ScrollText} title="No commands were run in this scan">
+            The inspector runs one external command, <code>npm audit</code>, and only in Localhost mode with a repository that has a package-lock.json. Requests and
+            checks are listed under their own filters.
+          </EmptyState>
+        ) : (
+          <EmptyState icon={ScrollText} title="No events match these filters" />
+        )
       ) : (
         <ol
           ref={listRef}
@@ -153,8 +168,8 @@ export function ActivityLog({
                     <span className="break-anywhere">{redactSecrets(event.message)}</span>
                   </p>
                   {event.output && (
-                    <details className="activity-output" open={event.kind === 'command' || undefined}>
-                      <summary>{event.kind === 'command' ? 'Command output' : 'Details'}</summary>
+                    <details className="activity-output" open={isCommand(event) || undefined}>
+                      <summary>{isCommand(event) ? 'Command output' : 'Details'}</summary>
                       <pre className="evidence">{redactSecrets(event.output)}</pre>
                     </details>
                   )}

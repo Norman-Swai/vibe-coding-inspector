@@ -1,5 +1,5 @@
 import { ListChecks } from 'lucide-react';
-import { FindingsPanel } from '../components/FindingsPanel';
+import { FindingsPanel, type FindingsUiState } from '../components/FindingsPanel';
 import { ReportPanel } from '../components/ReportPanel';
 import { EmptyState, ErrorNotice, Panel } from '../components/ui';
 import { ViewHeader } from '../components/ViewHeader';
@@ -60,13 +60,15 @@ export function FindingsView({
   scan,
   findings,
   error,
-  scanId,
+  ui,
+  onUiChange,
   onFindingUpdated,
 }: {
   scan: ScanStatusResponse | null;
   findings: Finding[];
   error: string | null;
-  scanId: string | null;
+  ui: FindingsUiState;
+  onUiChange: (patch: Partial<FindingsUiState>) => void;
   onFindingUpdated: (finding: Finding) => void;
 }) {
   return (
@@ -91,7 +93,7 @@ export function FindingsView({
       ) : (
         <>
           <FindingsSummary scan={scan} findings={findings} />
-          <FindingsPanel key={scanId ?? 'none'} scan={scan} findings={findings} onFindingUpdated={onFindingUpdated} />
+          <FindingsPanel scan={scan} findings={findings} ui={ui} onUiChange={onUiChange} onFindingUpdated={onFindingUpdated} />
           <ReportPanel scan={scan} findingsVersion={findings} />
         </>
       )}

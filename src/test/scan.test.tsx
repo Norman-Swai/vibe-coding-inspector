@@ -1,8 +1,9 @@
 import { act, render, renderHook, screen, waitFor, within } from '@testing-library/react';
+import { useState } from 'react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import App from '../App';
-import { FindingsPanel } from '../components/FindingsPanel';
+import { EMPTY_FINDINGS_UI, FindingsPanel, type FindingsUiState } from '../components/FindingsPanel';
 import { validateRepoPath, validateTarget } from '../components/LaunchPanel';
 import type { Finding } from '../contracts/finding';
 import { POLL_INTERVAL_MS, useScan } from '../hooks/useScan';
@@ -62,10 +63,15 @@ describe('launch form', () => {
   });
 });
 
+function FindingsHarness({ findings, onUpdated }: { findings: Finding[]; onUpdated: (finding: Finding) => void }) {
+  const [ui, setUi] = useState<FindingsUiState>(EMPTY_FINDINGS_UI);
+  return <FindingsPanel scan={makeScan()} findings={findings} ui={ui} onUiChange={(patch) => setUi((current) => ({ ...current, ...patch }))} onFindingUpdated={onUpdated} />;
+}
+
 function renderFindings(findings: Finding[], onUpdated = vi.fn()) {
   return render(
     <SettingsProvider>
-      <FindingsPanel scan={makeScan()} findings={findings} onFindingUpdated={onUpdated} />
+      <FindingsHarness findings={findings} onUpdated={onUpdated} />
     </SettingsProvider>,
   );
 }

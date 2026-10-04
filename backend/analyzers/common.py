@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Iterable, List, Optional, Sequence
+from typing import TYPE_CHECKING, Iterable, List, Optional, Pattern, Sequence, Tuple
 
 from ..schemas import Evidence, Finding, FixSuggestion, Location, ModuleName, Severity, Verification
 
@@ -121,6 +121,30 @@ def element_lines(tags: Sequence['Tag'], limit: int = 8) -> str:
     if len(tags) > limit:
         out.append(f'… and {len(tags) - limit} more')
     return '\n'.join(out)
+
+
+# Credential formats with a distinctive shape. Used by the secret scanner and to mask anything the inspector records.
+CREDENTIAL_FORMATS: List[Tuple[str, Pattern[str]]] = [
+    ('AWS access key ID', re.compile(r'\b(?:AKIA|ASIA)[0-9A-Z]{16}\b')),
+    ('Private key', re.compile(r'-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----')),
+    ('GitHub token', re.compile(r'\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,})\b')),
+    ('Slack token', re.compile(r'\bxox[abposr]-[A-Za-z0-9-]{10,}')),
+    ('Stripe live key', re.compile(r'\b[rs]k_live_[A-Za-z0-9]{20,}')),
+    ('Anthropic API key', re.compile(r'\bsk-ant-[A-Za-z0-9_-]{20,}')),
+    ('OpenAI API key', re.compile(r'\bsk-(?:proj-)?(?!ant-)[A-Za-z0-9_-]{32,}')),
+    ('Google API key', re.compile(r'\bAIza[0-9A-Za-z_-]{35}\b')),
+]
+# Values of URL query parameters whose names suggest a credential, e.g. ?access_token=… or &api_key=….
+_SECRET_QUERY_VALUE = re.compile(r'(?i)([?&;][\w.-]*(?:token|key|secret|passw(?:or)?d|pwd|auth|signature|sig|session|credential)[\w.-]*=)([^&#\s"\'<>]{4,})')
+
+
+def redact_secrets(text: str) -> str:
+    """Mask credential-shaped values (known key formats and secret-looking URL query values)."""
+    for _, pattern in CREDENTIAL_FORMATS:
+        if pattern.pattern.startswith('-----'):
+            continue  # The PEM header itself is not secret; the key material on later lines never reaches events.
+        text = pattern.sub(lambda match: mask_secret(match.group(0)), text)
+    return _SECRET_QUERY_VALUE.sub(lambda match: match.group(1) + mask_secret(match.group(2)), text)
 
 
 _STRING_LITERAL = re.compile(r'''(["'`])(?:\\.|(?!\1).)*\1''')

@@ -40,6 +40,7 @@ T = TypeVar('T')
 AnalyzerFn = Callable[[ScanContext], AnalyzerResult]
 MAX_STORED_SCANS = 50
 MAX_EVENTS_PER_SCAN = 2000
+MAX_ACTIVITY_CHARS_PER_SCAN = 2_000_000
 
 
 def _now() -> str:
@@ -52,6 +53,7 @@ class ScanStore:
     def __init__(self, max_scans: int = MAX_STORED_SCANS) -> None:
         self._lock = threading.Lock()
         self._records: OrderedDict[str, ScanRecord] = OrderedDict()
+        self._activity_chars: Dict[str, int] = {}
         self._max_scans = max_scans
 
     def create(self, request: ScanRequest) -> ScanRecord:
@@ -67,7 +69,8 @@ class ScanStore:
         with self._lock:
             self._records[record.id] = record
             while len(self._records) > self._max_scans:
-                self._records.popitem(last=False)
+                evicted, _ = self._records.popitem(last=False)
+                self._activity_chars.pop(evicted, None)
         return record.model_copy(deep=True)
 
     def get(self, scan_id: str) -> ScanRecord:
@@ -89,8 +92,12 @@ class ScanStore:
             if record is None:
                 return
             record.last_activity = event.message
-            if len(record.activity) < MAX_EVENTS_PER_SCAN:
+            request = event.request
+            size = len(event.message) + len(event.output or '') + (len(request.url) + len(request.final_url or '') if request else 0)
+            used = self._activity_chars.get(scan_id, 0)
+            if len(record.activity) < MAX_EVENTS_PER_SCAN and used + size <= MAX_ACTIVITY_CHARS_PER_SCAN:
                 record.activity.append(event)
+                self._activity_chars[scan_id] = used + size
             else:
                 record.activity_dropped += 1
 

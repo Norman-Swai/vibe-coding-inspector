@@ -1,5 +1,5 @@
 import { BarChart3 } from 'lucide-react';
-import { activityAsText, ActivityLog } from '../components/ActivityLog';
+import { activityAsText, ActivityLog, isCommand } from '../components/ActivityLog';
 import { CoveragePanel } from '../components/CoveragePanel';
 import { NetworkTable } from '../components/NetworkTable';
 import { EmptyState, ErrorNotice, Panel, Tag } from '../components/ui';
@@ -17,7 +17,11 @@ function ScanFacts({ scan, activity }: { scan: ScanStatusResponse; activity: Act
   const metrics = [
     { label: 'Requests sent', value: requests.length, detail: failedRequests ? `${failedRequests} failed` : 'none failed' },
     { label: 'Checks run', value: count(['check']), detail: 'with recorded results' },
-    { label: 'Commands run', value: count(['command']), detail: 'with captured output' },
+    {
+      label: 'Commands run',
+      value: activity.filter(isCommand).length,
+      detail: activity.some(isCommand) ? 'with captured output' : 'npm audit needs Localhost mode and a lockfile',
+    },
     { label: 'Warnings & errors', value: count(['warning', 'error']), detail: 'in the activity log' },
   ];
   return (

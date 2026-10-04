@@ -29,7 +29,8 @@ class FixtureSite:
                 for name, value in headers.items():
                     for item in value if isinstance(value, list) else [value]:
                         self.send_header(name, item)
-                self.send_header('Content-Length', str(len(data)))
+                if 'Content-Length' not in headers:
+                    self.send_header('Content-Length', str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
 

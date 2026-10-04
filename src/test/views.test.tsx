@@ -1,7 +1,9 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { StrictMode } from 'react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import App, { LAST_SCAN_KEY } from '../App';
+import { activityAsText } from '../components/ActivityLog';
 import type { ActivityEvent, ScanStatusResponse } from '../contracts/finding';
 import { parseHash } from '../hooks/useHashRoute';
 import { goTo, jsonResponse, makeEvent, makeFinding, makeScan, mockApi } from './utils';
@@ -114,9 +116,43 @@ describe('scanning indicator', () => {
     expect(document.title).toMatch(/^Scanning…/);
 
     act(() => goTo('#/launch'));
-    expect(screen.getByRole('button', { name: /Scan in progress/ })).toBeDisabled();
-    expect(screen.getByRole('status')).toHaveTextContent('1 of 4 modules finished');
+    // aria-disabled rather than disabled, so a keyboard user's focus stays on the button.
+    expect(screen.getByRole('button', { name: /Scan in progress/ })).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByText(/1 of 4 modules finished/)).toBeInTheDocument();
     expect(screen.getByText('$ npm audit --json → exit 0, 0 vulnerable packages')).toBeInTheDocument();
+  });
+});
+
+describe('announcements and focus', () => {
+  it('announces the end of a scan from any view through one live region', async () => {
+    let status: Partial<ScanStatusResponse> = { status: 'running', finished_at: null };
+    window.localStorage.setItem(LAST_SCAN_KEY, 'scan-1');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        mockApi({
+          '/api/scans/scan-1/activity': () => jsonResponse({ events: [], next_seq: 0, dropped: 0 }),
+          '/api/scans/scan-1/findings': () => jsonResponse([makeFinding()]),
+          '/api/scans/scan-1': () => jsonResponse(makeScan(status)),
+        }),
+      ),
+    );
+    render(<App />);
+    const live = screen.getByRole('status');
+    await screen.findByRole('link', { name: /Scanning/ });
+    expect(live).toHaveTextContent('');
+    status = {};
+    expect(await screen.findByText('Scan complete: 1 finding.')).toBe(live);
+  });
+
+  it('does not move focus on first load, even when effects run twice (StrictMode)', () => {
+    window.location.hash = '#/findings';
+    render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+    expect(document.body).toHaveFocus();
   });
 });
 
@@ -146,6 +182,46 @@ describe('analytics', () => {
     const log = await screen.findByRole('list', { name: 'Activity log' });
     expect(screen.getByLabelText('Search activity')).toHaveValue('/docs');
     expect(within(log).getAllByRole('listitem')).toHaveLength(1);
+  });
+
+  it('explains why there are no commands instead of a generic empty filter', async () => {
+    window.location.hash = '#/analytics';
+    useCompletedScan({}, ACTIVITY.slice(0, 4));
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole('list', { name: 'Activity log' });
+    await user.click(screen.getByRole('radio', { name: 'Commands' }));
+    expect(screen.getByText('No commands were run in this scan')).toBeInTheDocument();
+    expect(screen.getByText('npm audit needs Localhost mode and a lockfile')).toBeInTheDocument();
+  });
+
+  it('counts a failed command as a command and a problem', async () => {
+    window.location.hash = '#/analytics';
+    const failed = makeEvent({ seq: 6, module: 'security', kind: 'error', message: '$ npm audit --json → exit 1, audit failed: offline', output: 'offline' });
+    useCompletedScan({}, [...ACTIVITY.slice(0, 4), failed]);
+    const user = userEvent.setup();
+    render(<App />);
+    const log = await screen.findByRole('list', { name: 'Activity log' });
+    await user.click(screen.getByRole('radio', { name: 'Commands' }));
+    expect(within(log).getAllByRole('listitem')).toHaveLength(1);
+    await user.click(screen.getByRole('radio', { name: 'Problems' }));
+    expect(within(log).getAllByRole('listitem')).toHaveLength(1);
+  });
+
+  it('masks credential-shaped values in every place activity text is shown', async () => {
+    window.location.hash = '#/analytics';
+    const leaky = makeEvent({
+      seq: 6,
+      kind: 'request',
+      message: 'GET http://localhost:3000/maps?key=AIzaSyA1234567890abcdefghijklmnopqrstuv -> 200 OK',
+      request: { method: 'GET', url: 'http://localhost:3000/maps?access_token=abcdef123456', status: 200 },
+    });
+    useCompletedScan({}, [...ACTIVITY, leaky]);
+    render(<App />);
+    await screen.findByRole('list', { name: 'Activity log' });
+    expect(document.body.textContent).not.toContain('AIzaSyA1234567890abcdefghijklmnopqrstuv');
+    expect(document.body.textContent).not.toContain('abcdef123456');
+    expect(activityAsText([leaky])).not.toContain('AIzaSyA1234567890');
   });
 
   it('fetches only new activity events', async () => {
@@ -180,5 +256,40 @@ describe('findings view', () => {
     render(<App />);
     await waitFor(() => expect(window.localStorage.getItem(LAST_SCAN_KEY)).toBeNull());
     expect(screen.getByText('No findings yet')).toBeInTheDocument();
+    // The reason stays on screen after the scan id is cleared (it used to be wiped in the same render).
+    expect(await screen.findByText(/previous scan is no longer available/)).toBeInTheDocument();
+    act(() => goTo('#/launch'));
+    expect(screen.getByText(/previous scan is no longer available/)).toBeInTheDocument();
+  });
+
+  it('keeps the selected finding and filters after tracing to Analytics and going back', async () => {
+    window.location.hash = '#/findings';
+    window.localStorage.setItem(LAST_SCAN_KEY, 'scan-1');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        mockApi({
+          '/api/scans/scan-1/activity': () => jsonResponse({ events: ACTIVITY, next_seq: ACTIVITY.length, dropped: 0 }),
+          '/api/scans/scan-1/findings': () =>
+            jsonResponse([
+              makeFinding({ id: 'a', title: 'First finding', severity: 'high' }),
+              makeFinding({ id: 'b', title: 'Second finding', severity: 'low', location: { file: 'app.js', line_start: 2 } }),
+            ]),
+          '/api/scans/scan-1': () => jsonResponse(makeScan({ activity_count: ACTIVITY.length, summary: { ...makeScan().summary, total_findings: 2 } })),
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    await user.type(await screen.findByLabelText('Search findings'), 'finding');
+    await user.click(screen.getByRole('button', { name: /Second finding/ }));
+    expect(screen.getByRole('heading', { level: 3, name: 'Second finding' })).toBeInTheDocument();
+
+    act(() => goTo('#/analytics?q=app.js'));
+    expect(screen.getByRole('heading', { level: 1, name: 'Analytics' })).toBeInTheDocument();
+    act(() => goTo('#/findings'));
+
+    expect(screen.getByLabelText('Search findings')).toHaveValue('finding');
+    expect(screen.getByRole('heading', { level: 3, name: 'Second finding' })).toBeInTheDocument();
   });
 });

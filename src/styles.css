@@ -287,7 +287,7 @@ a {
   border: 1px solid color-mix(in srgb, var(--tone) 35%, transparent);
   border-radius: 999px;
   background: color-mix(in srgb, var(--tone) 12%, transparent);
-  color: var(--tone);
+  color: color-mix(in srgb, var(--tone) 78%, var(--text));
   font-size: 0.8125rem;
   font-weight: 650;
   text-decoration: none;
@@ -1454,7 +1454,6 @@ textarea:focus-visible {
   margin: 0;
   padding: 0;
   overflow: auto;
-  overscroll-behavior: contain;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   list-style: none;
@@ -1735,6 +1734,12 @@ textarea:focus-visible {
     padding: 0;
     border: 0;
     scroll-margin-top: calc(var(--topbar-h) + 1rem);
+  }
+
+  /* Like the findings list, the activity log flows with the page instead of being a nested scroller. */
+  .activity-list {
+    max-height: none;
+    overflow: visible;
   }
 
   .findings-layout[data-view='detail'] .findings-list-pane,

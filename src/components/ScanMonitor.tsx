@@ -2,7 +2,7 @@ import { Activity as ActivityIcon, ArrowRight, Radar } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { ScanStatusResponse } from '../contracts/finding';
 import { hrefFor } from '../hooks/useHashRoute';
-import { formatDuration, MODULE_META, MODULES } from '../lib/meta';
+import { formatDuration, MODULE_META, MODULES, redactSecrets } from '../lib/meta';
 import { EmptyState, ErrorNotice, Panel, StateBadge, Tag } from './ui';
 
 const TERMINAL = ['done', 'failed', 'skipped'];
@@ -78,7 +78,7 @@ export function ScanMonitor({
       <div className="progress" data-running={running || undefined} role="progressbar" aria-label="Modules finished" aria-valuemin={0} aria-valuemax={MODULES.length} aria-valuenow={finished}>
         <span style={{ width: `${Math.max(running ? 6 : 0, (finished / MODULES.length) * 100)}%` }} />
       </div>
-      <p className="monitor-summary" role="status">
+      <p className="monitor-summary">
         {running
           ? `${finished} of ${MODULES.length} modules finished · ${findingsCount} finding${findingsCount === 1 ? '' : 's'} so far`
           : `Scan complete: ${findingsCount} finding${findingsCount === 1 ? '' : 's'}${failed.length ? `, ${failed.length} module${failed.length === 1 ? '' : 's'} failed` : ''}`}
@@ -103,7 +103,7 @@ export function ScanMonitor({
         <p className="monitor-now">
           <ActivityIcon size={14} aria-hidden="true" />
           <span className="visually-hidden">Currently: </span>
-          <span className="monitor-now-text">{scan.last_activity}</span>
+          <span className="monitor-now-text">{redactSecrets(scan.last_activity)}</span>
         </p>
       )}
       {error && <ErrorNotice>{error}</ErrorNotice>}

@@ -1,19 +1,31 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, TypeVar
 
-from .analyzers.common import ScanError, plural, truncate
+from .analyzers.common import ScanError, plural, redact_secrets, truncate
 from .analyzers.repo import MAX_FILE_BYTES, RepoIndex
 from .analyzers.web import CrawlResult, FetchResult, PageFetcher, crawl, normalize_url
 from .schemas import ActivityEvent, ActivityKind, InspectionMode, ModuleName, RequestInfo, ScanRecord
 
 T = TypeVar('T')
 EventSink = Callable[[ActivityEvent], None]
+MAX_MESSAGE_CHARS = 500
 MAX_OUTPUT_CHARS = 4000
+MAX_URL_CHARS = 2000
+logger = logging.getLogger(__name__)
+
+
+def _clean(text: Optional[str], limit: int) -> Optional[str]:
+    """Bound and mask text that may come from the scanned site before it is stored or shown."""
+    if not text:
+        return text
+    # Truncate generously first so masking stays cheap, mask, then apply the real limit (never cutting a secret in half unmasked).
+    return truncate(redact_secrets(text[: limit * 4]), limit)
 
 
 class ActivityRecorder:
@@ -35,37 +47,47 @@ class ActivityRecorder:
         output: Optional[str] = None,
         request: Optional[RequestInfo] = None,
     ) -> None:
-        with self._lock:
-            self._seq += 1
-            event = ActivityEvent(
-                seq=self._seq,
-                at_ms=int((time.perf_counter() - self._started) * 1000),
-                module=module,
-                kind=kind,
-                message=message,
-                output=truncate(output, MAX_OUTPUT_CHARS) if output else None,
-                request=request,
-            )
-            if self._sink is None:
-                self.events.append(event)
-            else:
-                self._sink(event)
+        # Recording activity must never break the scan it describes.
+        try:
+            if request is not None:
+                request = request.model_copy(update={'url': _clean(request.url, MAX_URL_CHARS), 'final_url': _clean(request.final_url, MAX_URL_CHARS)})
+            with self._lock:
+                self._seq += 1
+                event = ActivityEvent(
+                    seq=self._seq,
+                    at_ms=int((time.perf_counter() - self._started) * 1000),
+                    module=module,
+                    kind=kind,
+                    message=_clean(message, MAX_MESSAGE_CHARS) or '',
+                    output=_clean(output, MAX_OUTPUT_CHARS),
+                    request=request,
+                )
+                if self._sink is None:
+                    self.events.append(event)
+                else:
+                    self._sink(event)
+        except Exception:  # noqa: BLE001
+            logger.exception('Could not record activity event: %.200s', message)
 
 
 def request_event(result: FetchResult) -> tuple[str, RequestInfo]:
-    size = len(result.text.encode()) if result.text else None
-    if size is None and result.headers.get('content-length', '').isdigit():
-        size = int(result.headers['content-length'])
     info = RequestInfo(
         url=result.requested_url,
         final_url=result.url if result.url != result.requested_url else None,
         status=result.status,
         content_type=result.content_type or None,
-        bytes=size,
+        bytes=result.size_bytes,
         duration_ms=result.elapsed_ms,
         error=result.error,
     )
-    return result.describe(), info
+    if result.error:
+        message = f'GET {result.requested_url} failed: {result.error}'
+    else:
+        hops = f' → {plural(len(result.redirects), "redirect")} → {result.url}' if result.redirects else ''
+        kind = f' {result.content_type}' if result.content_type else ''
+        partial = ' (first 2 MB only)' if result.truncated else ''
+        message = f'GET {result.requested_url}{hops} -> {result.status} {result.reason}{kind} ({result.elapsed_ms} ms){partial}'
+    return message, info
 
 
 class ScanContext:

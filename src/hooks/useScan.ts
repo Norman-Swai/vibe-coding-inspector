@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, apiClient } from '../api/client';
-import type { ActivityEvent, Finding, ScanStatusResponse } from '../contracts/finding';
+import type { ActivityEvent, ActivityPage, Finding, ScanStatusResponse } from '../contracts/finding';
 
 export const POLL_INTERVAL_MS = 800;
 const MAX_BACKOFF_MS = 10_000;
@@ -14,9 +14,12 @@ function message(error: unknown) {
  * - Findings are only re-fetched when the status shows that something changed.
  * - The activity log is fetched incrementally (?since=) whenever the status reports new events.
  * - A poll that started before a local review update never overwrites it.
- * - If the backend no longer knows the scan (e.g. it restarted), polling stops and onMissing is called.
+ * - Status, activity and findings from one poll are applied together, so counts, logs and lists always agree.
+ * - If the backend no longer knows the scan (e.g. it restarted), polling stops and onMissing is called with a message.
  */
-export function useScan(scanId: string | null, onMissing?: () => void) {
+export const MISSING_SCAN_MESSAGE = 'The previous scan is no longer available (the inspector API was probably restarted). Start a new scan.';
+
+export function useScan(scanId: string | null, onMissing?: (message: string) => void) {
   const [scan, setScan] = useState<ScanStatusResponse | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [activity, setActivity] = useState<ActivityEvent[]>([]);
@@ -46,25 +49,30 @@ export function useScan(scanId: string | null, onMissing?: () => void) {
       try {
         const status = await apiClient.getScan(scanId);
         if (cancelled) return;
-        setScan(status);
-
+        let page: ActivityPage | null = null;
         if (status.activity_count > knownEvents) {
-          const page = await apiClient.getActivity(scanId, nextSeq);
+          page = await apiClient.getActivity(scanId, nextSeq);
           if (cancelled) return;
-          if (page.events.length) setActivity((current) => [...current, ...page.events]);
+        }
+        const signature = `${status.status}|${status.summary.total_findings}|${Object.values(status.module_status).join(',')}`;
+        let list: Finding[] | null = null;
+        if (signature !== syncedSignature) {
+          list = await apiClient.getFindings(scanId);
+          if (cancelled) return;
+        }
+
+        // Apply everything from this poll in one render (React batches these synchronous updates).
+        setScan(status);
+        if (page) {
+          const fresh = page.events;
+          if (fresh.length) setActivity((current) => [...current, ...fresh]);
           nextSeq = page.next_seq;
           knownEvents = page.next_seq + page.dropped;
           setActivityDropped(page.dropped);
         }
-
-        const signature = `${status.status}|${status.summary.total_findings}|${Object.values(status.module_status).join(',')}`;
-        if (signature !== syncedSignature) {
-          const list = await apiClient.getFindings(scanId);
-          if (cancelled) return;
-          if (localEdits.current === editsAtStart) {
-            setFindings(list);
-            syncedSignature = signature;
-          }
+        if (list && localEdits.current === editsAtStart) {
+          setFindings(list);
+          syncedSignature = signature;
         }
         failures = 0;
         setError(null);
@@ -73,8 +81,8 @@ export function useScan(scanId: string | null, onMissing?: () => void) {
       } catch (pollError) {
         if (cancelled) return;
         if (pollError instanceof ApiError && pollError.status === 404) {
-          setError('This scan is no longer available (the inspector API was probably restarted). Start a new scan.');
-          missingRef.current?.();
+          // The caller owns the message: this hook's state is reset as soon as the scan id is cleared.
+          missingRef.current?.(MISSING_SCAN_MESSAGE);
           return;
         }
         failures += 1;

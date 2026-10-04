@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, List, Optional, Pattern, Tuple
 from urllib.parse import urlparse
 
 from ..schemas import ActivityKind, Finding, Location, ModuleName, Severity, Verification
-from .common import AnalyzerResult, Rule, code_only, is_comment_line, mask_secret, new_finding, numbered_lines, plural, truncate
+from .common import CREDENTIAL_FORMATS, AnalyzerResult, Rule, code_only, is_comment_line, mask_secret, new_finding, numbered_lines, plural, truncate
 from .repo import RepoIndex
 from .web import FetchResult
 
@@ -198,14 +198,7 @@ SECRET_RULE = Rule(
     cwe='CWE-798',
 )
 SECRET_PATTERNS: List[Tuple[str, Pattern[str], Severity, Verification]] = [
-    ('AWS access key ID', re.compile(r'\b(?:AKIA|ASIA)[0-9A-Z]{16}\b'), Severity.critical, Verification.confirmed),
-    ('Private key', re.compile(r'-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----'), Severity.critical, Verification.confirmed),
-    ('GitHub token', re.compile(r'\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,})\b'), Severity.critical, Verification.confirmed),
-    ('Slack token', re.compile(r'\bxox[abposr]-[A-Za-z0-9-]{10,}'), Severity.critical, Verification.confirmed),
-    ('Stripe live key', re.compile(r'\b[rs]k_live_[A-Za-z0-9]{20,}'), Severity.critical, Verification.confirmed),
-    ('Anthropic API key', re.compile(r'\bsk-ant-[A-Za-z0-9_-]{20,}'), Severity.critical, Verification.confirmed),
-    ('OpenAI API key', re.compile(r'\bsk-(?:proj-)?(?!ant-)[A-Za-z0-9_-]{32,}'), Severity.critical, Verification.confirmed),
-    ('Google API key', re.compile(r'\bAIza[0-9A-Za-z_-]{35}\b'), Severity.high, Verification.confirmed),
+    (label, pattern, Severity.high if label == 'Google API key' else Severity.critical, Verification.confirmed) for label, pattern in CREDENTIAL_FORMATS
 ]
 GENERIC_SECRET = re.compile(
     r'''(?i)\b([\w.-]*(?:api[_-]?key|secret|token|passw(?:or)?d|pwd|auth[_-]?key|private[_-]?key|client[_-]?secret|access[_-]?key)[\w.-]*)["']?\s*[:=]\s*(["'`])([^"'`\s]{8,})\2'''
@@ -443,6 +436,15 @@ class AuditRun:
     command: Optional[str] = None
     exit_code: Optional[int] = None
     output: Optional[str] = None
+    # The command ran but did not produce an audit (registry unreachable, timeout, unreadable output).
+    failed: bool = False
+    reason: Optional[str] = None
+
+    def headline(self) -> str:
+        exit_text = f'exit {self.exit_code}' if self.exit_code is not None else 'no exit code'
+        if self.failed:
+            return f'$ {self.command} → {exit_text}, audit failed: {self.reason}'
+        return f'$ {self.command} → {exit_text}, {plural(len(self.findings), "vulnerable package")}'
 
 
 def run_npm_audit(repo: RepoIndex) -> AuditRun:
@@ -458,20 +460,33 @@ def run_npm_audit(repo: RepoIndex) -> AuditRun:
     try:
         completed = subprocess.run([npm, 'audit', '--json'], cwd=root, capture_output=True, text=True, timeout=90, check=False)
     except subprocess.TimeoutExpired:
-        return AuditRun(note='npm audit skipped: it did not finish within 90 seconds.', command=command, output='timed out after 90 s')
+        return AuditRun(
+            note='npm audit failed: it did not finish within 90 seconds.', command=command, output='timed out after 90 s', failed=True, reason='timed out after 90 s'
+        )
     stderr = (completed.stderr or '').strip()
+    stderr_block = f'\n--- stderr ---\n{truncate(stderr, 1500)}' if stderr else ''
     try:
         payload = json.loads(completed.stdout or '{}')
     except json.JSONDecodeError:
         return AuditRun(
-            note='npm audit skipped: its output was not valid JSON.',
+            note='npm audit failed: its output was not valid JSON.',
             command=command,
             exit_code=completed.returncode,
-            output=truncate((completed.stdout or '') + '\n' + stderr, 2000),
+            output=truncate(completed.stdout or '', 2000) + stderr_block,
+            failed=True,
+            reason='output was not valid JSON',
         )
     if 'error' in payload:
-        summary = truncate(str(payload['error'].get('summary') or payload['error']), 160)
-        return AuditRun(note=f'npm audit failed: {summary}', command=command, exit_code=completed.returncode, output=truncate(json.dumps(payload['error'], indent=2), 2000))
+        error = payload['error'] if isinstance(payload['error'], dict) else {'summary': str(payload['error'])}
+        reason = truncate(str(error.get('summary') or payload.get('message') or error.get('detail') or stderr or 'unknown error'), 200)
+        return AuditRun(
+            note=f'npm audit failed: {reason}',
+            command=command,
+            exit_code=completed.returncode,
+            output=truncate(json.dumps({key: payload[key] for key in ('message', 'error') if key in payload}, indent=2), 2000) + stderr_block,
+            failed=True,
+            reason=reason,
+        )
 
     findings: List[Finding] = []
     for package, details in sorted(payload.get('vulnerabilities', {}).items()):
@@ -574,7 +589,7 @@ def run_security_analysis(context: 'ScanContext') -> AnalyzerResult:
         context.emit(
             MODULE,
             ActivityKind.check,
-            f'Risky code patterns: {plural(len(sinks), "file")} flagged across {len(SINK_RULES)} rules',
+            f'Risky code patterns: {plural(len(sinks), "match", "matches")} in {plural(len({f.location.file for f in sinks}), "file")} across {len(SINK_RULES)} rules',
             '\n'.join(f'{rule.title}: {sum(1 for f in sinks if f.title == rule.title)} file(s)' for rule, _, _ in SINK_RULES),
         )
         env_findings = scan_env_files(repo)
@@ -583,12 +598,8 @@ def run_security_analysis(context: 'ScanContext') -> AnalyzerResult:
         audit = run_npm_audit(repo)
         result.findings.extend(audit.findings)
         if audit.command:
-            context.emit(
-                MODULE,
-                ActivityKind.command,
-                f'$ {audit.command} → exit {audit.exit_code if audit.exit_code is not None else "n/a"}, {plural(len(audit.findings), "vulnerable package")}',
-                audit.output,
-            )
+            # A failed run is still a command the user should see with its output, flagged as an error rather than "0 vulnerable".
+            context.emit(MODULE, ActivityKind.error if audit.failed else ActivityKind.command, audit.headline(), audit.output)
         elif audit.note:
             context.emit(MODULE, ActivityKind.warning, audit.note)
         if audit.note:

@@ -155,7 +155,7 @@ def run_runtime_analysis(context: 'ScanContext') -> AnalyzerResult:
         error_finding = _error_text(page)
         if error_finding:
             result.findings.append(error_finding)
-        context.emit(MODULE, ActivityKind.check, f'Inspected {urlparse(page.url).path or "/"}', _page_summary(grouped, before, error_finding is not None, urlparse(page.url).scheme == 'https'))
+        context.emit(MODULE, ActivityKind.check, f'Inspected {page.url}', _page_summary(grouped, before, error_finding is not None, urlparse(page.url).scheme == 'https'))
 
     for rule, hits in grouped.items():
         if hits:

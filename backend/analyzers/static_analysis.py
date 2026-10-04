@@ -119,18 +119,26 @@ def _py_candidates(base: Path, dots: str, module: str) -> List[Path]:
     return [target.with_name(target.name + '.py'), target / '__init__.py', target]
 
 
+def _relative_imports(source: SourceFile) -> List[re.Match]:
+    """Relative import statements in a JS/TS or Python file, ignoring ones inside comments."""
+    pattern = _JS_IMPORT if source.suffix in JS else _PY_RELATIVE_IMPORT if source.suffix in PY else None
+    if pattern is None:
+        return []
+    lines = source.lines
+    return [match for match in pattern.finditer(source.text or '') if not is_comment_line(lines[source.line_of(match.start()) - 1])]
+
+
 def _unresolved_imports(source: SourceFile) -> Optional[Finding]:
-    text = source.text or ''
     base = source.path.parent
     misses: List[Tuple[int, str, List[Path]]] = []
     if source.suffix in JS:
-        for match in _JS_IMPORT.finditer(text):
+        for match in _relative_imports(source):
             spec = match.group(2)
             candidates = _js_candidates(base, spec)
             if not any(candidate.is_file() for candidate in candidates):
                 misses.append((source.line_of(match.start(2)), spec, candidates))
     elif source.suffix in PY:
-        for match in _PY_RELATIVE_IMPORT.finditer(text):
+        for match in _relative_imports(source):
             candidates = _py_candidates(base, match.group(1), match.group(2))
             if not (candidates[0].is_file() or candidates[1].is_file() or candidates[2].is_dir()):
                 misses.append((source.line_of(match.start()), match.group(1) + match.group(2), candidates))
@@ -203,8 +211,12 @@ def analyse_repo_with_stats(repo: RepoIndex) -> Tuple[List[Finding], int, List[s
                 per_rule[rule.title] = ([*files, source.rel], hits + finding.evidence.occurrences)
     js = [source for source in sources if source.suffix in JS]
     py = [source for source in sources if source.suffix in PY]
-    imports = sum(len(_JS_IMPORT.findall(source.text or '')) for source in js) + sum(len(_PY_RELATIVE_IMPORT.findall(source.text or '')) for source in py)
-    stats = [f'Files read: {len(sources)} ({len(js)} JS/TS, {len(py)} Python, {len(sources) - len(js) - len(py)} other)', f'Relative imports resolved on disk: {imports}']
+    imports = sum(len(_relative_imports(source)) for source in js + py)
+    unresolved = per_rule[UNRESOLVED_IMPORT.title][1]
+    stats = [
+        f'Files read: {len(sources)} ({len(js)} JS/TS, {len(py)} Python, {len(sources) - len(js) - len(py)} other)',
+        f'Relative imports checked on disk: {imports} ({imports - unresolved} resolved, {unresolved} missing)',
+    ]
     stats += [
         f'{title}: {len(files)} file(s), {hits} occurrence(s)' + (f' — {", ".join(files[:5])}{" …" if len(files) > 5 else ""}' if files else '')
         for title, (files, hits) in per_rule.items()

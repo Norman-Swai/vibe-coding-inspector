@@ -1,15 +1,17 @@
 import { Globe } from 'lucide-react';
 import type { ActivityEvent } from '../contracts/finding';
-import { formatBytes, formatDuration } from '../lib/meta';
+import { formatBytes, formatDuration, redactSecrets } from '../lib/meta';
 import { EmptyState, Panel } from './ui';
 
 function shortUrl(url: string, base: string) {
+  let short = url;
   try {
     const parsed = new URL(url);
-    return parsed.origin === new URL(base).origin ? `${parsed.pathname}${parsed.search}` : url;
+    if (parsed.origin === new URL(base).origin) short = `${parsed.pathname}${parsed.search}`;
   } catch {
-    return url;
+    // Keep the raw value.
   }
+  return redactSecrets(short);
 }
 
 function statusTone(status?: number | null, error?: string | null) {

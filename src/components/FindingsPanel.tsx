@@ -1,5 +1,5 @@
 import { CheckCircle2, FilterX, Hourglass, ListChecks, Search } from 'lucide-react';
-import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useMemo, useRef } from 'react';
 import type { Finding, ModuleName, ScanStatusResponse, Severity } from '../contracts/finding';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { compareSeverity, formatLocation, MODULE_META, MODULES, SEVERITIES, SEVERITY_META } from '../lib/meta';
@@ -17,21 +17,36 @@ function matchesQuery(finding: Finding, query: string) {
     .every((word) => haystack.includes(word));
 }
 
+/** Selection and filters. Owned by the app shell so they survive a round trip to Analytics ("Trace" then Back). */
+export interface FindingsUiState {
+  severities: Severity[];
+  module: ModuleName | 'all';
+  query: string;
+  selectedId: string | null;
+  detailOpen: boolean;
+}
+
+export const EMPTY_FINDINGS_UI: FindingsUiState = { severities: [], module: 'all', query: '', selectedId: null, detailOpen: false };
+
 export function FindingsPanel({
   scan,
   findings,
+  ui,
+  onUiChange,
   onFindingUpdated,
 }: {
   scan: ScanStatusResponse | null;
   findings: Finding[];
+  ui: FindingsUiState;
+  onUiChange: (patch: Partial<FindingsUiState>) => void;
   onFindingUpdated: (finding: Finding) => void;
 }) {
   const narrow = useMediaQuery(NARROW);
-  const [severities, setSeverities] = useState<Set<Severity>>(new Set());
-  const [module, setModule] = useState<ModuleName | 'all'>('all');
-  const [query, setQuery] = useState('');
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [detailOpen, setDetailOpen] = useState(false);
+  const { module, query, selectedId, detailOpen } = ui;
+  const severities = useMemo(() => new Set(ui.severities), [ui.severities]);
+  const setModule = (value: ModuleName | 'all') => onUiChange({ module: value });
+  const setQuery = (value: string) => onUiChange({ query: value });
+  const setSeverities = (value: Set<Severity>) => onUiChange({ severities: [...value] });
   const detailRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
 
@@ -46,16 +61,23 @@ export function FindingsPanel({
   const filtered = severities.size > 0 || module !== 'all' || query.trim() !== '';
 
   useEffect(() => {
-    if (narrow && showDetail) detailRef.current?.scrollIntoView({ block: 'start' });
+    // After the shell's scroll-to-top on navigation, bring a restored selection back into view.
+    const frame = requestAnimationFrame(() => {
+      if (narrow && showDetail) detailRef.current?.scrollIntoView({ block: 'start' });
+      else if (!narrow && selectedId) itemFor(selectedId)?.scrollIntoView({ block: 'nearest' });
+    });
+    return () => cancelAnimationFrame(frame);
   }, [narrow, showDetail, selectedId]);
 
+  function itemFor(id: string) {
+    return Array.from(listRef.current?.querySelectorAll<HTMLElement>('[data-id]') ?? []).find((item) => item.dataset.id === id) ?? null;
+  }
+
   function toggleSeverity(severity: Severity) {
-    setSeverities((current) => {
-      const next = new Set(current);
-      if (next.has(severity)) next.delete(severity);
-      else next.add(severity);
-      return next;
-    });
+    const next = new Set(severities);
+    if (next.has(severity)) next.delete(severity);
+    else next.add(severity);
+    setSeverities(next);
   }
 
   function clearFilters() {
@@ -65,13 +87,12 @@ export function FindingsPanel({
   }
 
   function select(id: string) {
-    setSelectedId(id);
-    setDetailOpen(true);
+    onUiChange({ selectedId: id, detailOpen: true });
   }
 
   function back() {
-    setDetailOpen(false);
-    requestAnimationFrame(() => listRef.current?.querySelector<HTMLElement>(`[data-id="${selectedId}"]`)?.focus());
+    onUiChange({ detailOpen: false });
+    requestAnimationFrame(() => (selectedId ? itemFor(selectedId) : null)?.focus());
   }
 
   const running = scan?.status === 'running';

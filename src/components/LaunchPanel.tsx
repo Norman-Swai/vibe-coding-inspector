@@ -63,6 +63,7 @@ export function LaunchPanel({
 
   function submit(event: FormEvent) {
     event.preventDefault();
+    if (busy || running) return;
     setSubmitted(true);
     if (!canSubmit) return;
     onStart({
@@ -136,7 +137,8 @@ export function LaunchPanel({
               Change
             </button>
           </p>
-          <button type="submit" className="button button-primary" disabled={busy || running} aria-disabled={!canSubmit}>
+          {/* aria-disabled, not disabled: a disabled button drops keyboard focus to <body> mid-scan. */}
+          <button type="submit" className="button button-primary" aria-disabled={!canSubmit}>
             {running ? <span className="spinner" aria-hidden="true" /> : <Play size={16} aria-hidden="true" />}
             {busy ? 'Starting…' : running ? 'Scan in progress…' : 'Start scan'}
           </button>

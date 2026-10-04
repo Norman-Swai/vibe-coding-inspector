@@ -155,6 +155,14 @@ const SECRET_SHAPES = [
   /\bAIza[0-9A-Za-z_-]{35}\b/g,
 ];
 
+// Values of URL query parameters whose names suggest a credential (?access_token=…, &api_key=…). Mirrors backend/analyzers/common.py.
+const SECRET_QUERY_VALUE = /([?&;][\w.-]*(?:token|key|secret|passw(?:or)?d|pwd|auth|signature|sig|session|credential)[\w.-]*=)([^&#\s"'<>]{4,})/gi;
+
+function mask(value: string) {
+  return value.length <= 8 ? '••••••••' : `${value.slice(0, 3)}•••••• [${value.length} chars]`;
+}
+
 export function redactSecrets(text: string): string {
-  return SECRET_SHAPES.reduce((value, pattern) => value.replace(pattern, (match) => `${match.slice(0, 3)}•••••• [${match.length} chars]`), text);
+  const masked = SECRET_SHAPES.reduce((value, pattern) => value.replace(pattern, (match) => (match.includes('••••••') ? match : mask(match))), text);
+  return masked.replace(SECRET_QUERY_VALUE, (_, name: string, value: string) => (value.includes('••••••') ? name + value : name + mask(value)));
 }
