@@ -100,4 +100,36 @@ export interface ScanStatusResponse {
     by_severity: Record<Severity, number>;
     by_category: Record<ModuleName, number>;
   };
+  activity_count: number;
+  last_activity?: string | null;
+}
+
+export type ActivityKind = 'step' | 'request' | 'check' | 'command' | 'result' | 'warning' | 'error';
+
+export interface RequestInfo {
+  method: string;
+  url: string;
+  final_url?: string | null;
+  status?: number | null;
+  content_type?: string | null;
+  bytes?: number | null;
+  duration_ms?: number | null;
+  error?: string | null;
+}
+
+/** One thing the inspector did during a scan. module is null for shared work (HTTP client, crawler, repo index). */
+export interface ActivityEvent {
+  seq: number;
+  at_ms: number;
+  module: ModuleName | null;
+  kind: ActivityKind;
+  message: string;
+  output?: string | null;
+  request?: RequestInfo | null;
+}
+
+export interface ActivityPage {
+  events: ActivityEvent[];
+  next_seq: number;
+  dropped: number;
 }

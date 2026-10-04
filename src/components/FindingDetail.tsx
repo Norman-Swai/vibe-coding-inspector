@@ -1,7 +1,8 @@
-import { ArrowLeft, Check, ExternalLink, Flag, X } from 'lucide-react';
+import { ArrowLeft, Check, Copy, ExternalLink, Flag, ScrollText, X } from 'lucide-react';
 import { useState } from 'react';
 import { apiClient } from '../api/client';
 import type { Finding, FixReviewDecision, ReviewDecision } from '../contracts/finding';
+import { hrefFor } from '../hooks/useHashRoute';
 import { formatLocation, formatTime, MODULE_META, redactSecrets } from '../lib/meta';
 import { useSettings } from '../lib/settings';
 import { ErrorNotice, Field, SeverityBadge, Tag } from './ui';
@@ -34,6 +35,19 @@ export function FindingDetail({
   const { evidence, review } = finding;
   const fixDecision = finding.fix_review?.decision ?? 'pending';
   const cwe = cweUrl(finding.cwe_id);
+  const excerpt = redactSecrets(evidence.snippet || '(no excerpt captured)');
+  const traceQuery = finding.location.url ?? finding.location.file ?? null;
+  const [copied, setCopied] = useState(false);
+
+  async function copyExcerpt() {
+    try {
+      await navigator.clipboard.writeText(excerpt);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setError('Copy failed: the browser blocked clipboard access.');
+    }
+  }
 
   async function run(key: string, action: () => Promise<Finding>) {
     setPending(key);
@@ -78,8 +92,15 @@ export function FindingDetail({
         <h3 id={`finding-${finding.id}`}>{finding.title}</h3>
       </header>
 
-      <section className="detail-section" aria-label="Evidence">
-        <h4>Evidence</h4>
+      <section className="detail-section" aria-labelledby={`artifacts-${finding.id}`}>
+        <div className="section-title-row">
+          <h4 id={`artifacts-${finding.id}`}>Artifacts</h4>
+          {traceQuery && (
+            <a className="link-button small" href={hrefFor('analytics', { q: traceQuery })}>
+              <ScrollText size={14} aria-hidden="true" /> Trace in Analytics
+            </a>
+          )}
+        </div>
         <dl className="facts">
           <div>
             <dt>Location</dt>
@@ -111,9 +132,17 @@ export function FindingDetail({
           )}
         </dl>
         {/* Captured content is untrusted: React renders it as text, never as HTML. */}
-        <pre className="evidence" tabIndex={0} aria-label="Evidence excerpt">
-          {redactSecrets(evidence.snippet || '(no excerpt captured)')}
-        </pre>
+        <div className="artifact">
+          <div className="artifact-bar">
+            <span className="muted small">Captured excerpt</span>
+            <button type="button" className="link-button small" onClick={() => void copyExcerpt()}>
+              <Copy size={14} aria-hidden="true" /> {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+          <pre className="evidence" tabIndex={0} aria-label="Evidence excerpt">
+            {excerpt}
+          </pre>
+        </div>
       </section>
 
       <section className="detail-section">

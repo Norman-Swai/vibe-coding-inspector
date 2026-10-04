@@ -101,6 +101,6 @@ def test_env_file_must_be_git_ignored(tmp_path):
 
 def test_npm_audit_explains_why_it_did_not_run(tmp_path):
     write_files(tmp_path, {'package.json': '{"name": "x"}'})
-    findings, note = run_npm_audit(RepoIndex(tmp_path))
-    assert findings == []
-    assert 'no package-lock.json' in note
+    audit = run_npm_audit(RepoIndex(tmp_path))
+    assert audit.findings == [] and audit.command is None
+    assert 'no package-lock.json' in audit.note

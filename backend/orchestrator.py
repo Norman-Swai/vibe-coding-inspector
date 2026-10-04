@@ -7,7 +7,7 @@ import uuid
 from collections import Counter, OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from typing import Callable, Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional, TypeVar
 
 from .analyzers.common import AnalyzerResult, ScanError
 from .analyzers.compliance import run_compliance_analysis
@@ -17,6 +17,9 @@ from .analyzers.static_analysis import run_static_analysis
 from .context import ScanContext
 from .schemas import (
     SEVERITY_ORDER,
+    ActivityEvent,
+    ActivityKind,
+    ActivityPage,
     Finding,
     ModuleName,
     ModuleReport,
@@ -32,9 +35,11 @@ from .schemas import (
 )
 
 logger = logging.getLogger(__name__)
+T = TypeVar('T')
 
 AnalyzerFn = Callable[[ScanContext], AnalyzerResult]
 MAX_STORED_SCANS = 50
+MAX_EVENTS_PER_SCAN = 2000
 
 
 def _now() -> str:
@@ -73,6 +78,28 @@ class ScanStore:
         with self._lock:
             change(self._records[scan_id])
 
+    def read(self, scan_id: str, view: Callable[[ScanRecord], T]) -> T:
+        """Run ``view`` under the lock; it must copy whatever it returns."""
+        with self._lock:
+            return view(self._records[scan_id])
+
+    def append_event(self, scan_id: str, event: ActivityEvent) -> None:
+        with self._lock:
+            record = self._records.get(scan_id)
+            if record is None:
+                return
+            record.last_activity = event.message
+            if len(record.activity) < MAX_EVENTS_PER_SCAN:
+                record.activity.append(event)
+            else:
+                record.activity_dropped += 1
+
+    def activity_since(self, scan_id: str, since: int) -> ActivityPage:
+        with self._lock:
+            record = self._records[scan_id]
+            events = [event.model_copy(deep=True) for event in record.activity if event.seq > since]
+            return ActivityPage(events=events, next_seq=events[-1].seq if events else since, dropped=record.activity_dropped)
+
     def update_finding(self, finding_id: str, updater: Callable[[Finding], Finding]) -> Finding:
         with self._lock:
             for record in self._records.values():
@@ -100,17 +127,35 @@ class InspectionOrchestrator:
         return record
 
     def execute_scan(self, scan_id: str) -> None:
-        context = ScanContext(self.store.get(scan_id))
+        record = self.store.get(scan_id)
+        context = ScanContext(record, sink=lambda event: self.store.append_event(scan_id, event))
+        started = time.perf_counter()
+        context.emit(
+            None,
+            ActivityKind.step,
+            f'Scan started: {record.target_url} ({record.inspection_mode.value} mode)',
+            '\n'.join(
+                [
+                    f'repository: {record.repo_path or "not provided"}',
+                    f'max pages: {record.options.max_pages}',
+                    f'request timeout: {record.options.timeout_seconds:g} s',
+                    f'modules: {", ".join(module.value for module in self.analyzers)} (run in parallel)',
+                ]
+            ),
+        )
         try:
             with ThreadPoolExecutor(max_workers=len(self.analyzers), thread_name_prefix='module') as pool:
                 for module, analyzer in self.analyzers.items():
                     skip_reason = self._skip_reason(module, context)
                     if skip_reason:
                         self._set_report(scan_id, module, ModuleReport(state=ModuleState.skipped, notes=[skip_reason]))
+                        context.emit(module, ActivityKind.step, f'{module.value} skipped: {skip_reason}')
                     else:
                         pool.submit(self._run_module, scan_id, module, analyzer, context)
         finally:
             context.close()
+            total = self.store.read(scan_id, lambda r: len(r.findings))
+            context.emit(None, ActivityKind.result, f'Scan completed in {int((time.perf_counter() - started) * 1000)} ms: {total} finding(s)')
 
             def finish(record: ScanRecord) -> None:
                 record.status = ScanState.completed
@@ -127,6 +172,7 @@ class InspectionOrchestrator:
     def _run_module(self, scan_id: str, module: ModuleName, analyzer: AnalyzerFn, context: ScanContext) -> None:
         report = ModuleReport(state=ModuleState.running, started_at=_now())
         self._set_report(scan_id, module, report)
+        context.emit(module, ActivityKind.step, f'{module.value} module started')
         started = time.perf_counter()
         result: Optional[AnalyzerResult] = None
         try:
@@ -142,6 +188,7 @@ class InspectionOrchestrator:
         if result is None:
             report.state = ModuleState.failed
             self._set_report(scan_id, module, report)
+            context.emit(module, ActivityKind.error, f'{module.value} module failed after {report.duration_ms} ms: {report.error}')
             return
 
         report.state = ModuleState.done
@@ -154,6 +201,11 @@ class InspectionOrchestrator:
             record.modules[module] = report
 
         self.store.mutate(scan_id, apply)
+        context.emit(
+            module,
+            ActivityKind.result,
+            f'{module.value} module done in {report.duration_ms} ms: {len(result.findings)} finding(s), scanned {report.scanned_label or report.scanned}',
+        )
 
     def _set_report(self, scan_id: str, module: ModuleName, report: ModuleReport) -> None:
         snapshot = report.model_copy(deep=True)
@@ -164,26 +216,33 @@ class InspectionOrchestrator:
         self.store.mutate(scan_id, change)
 
     def get_status(self, scan_id: str) -> ScanStatusResponse:
-        record = self.store.get(scan_id)
-        severity_counts = Counter(finding.severity for finding in record.findings)
-        category_counts = Counter(finding.category for finding in record.findings)
-        return ScanStatusResponse(
-            id=record.id,
-            target_url=record.target_url,
-            repo_path=record.repo_path,
-            inspection_mode=record.inspection_mode,
-            options=record.options,
-            status=record.status,
-            created_at=record.created_at,
-            finished_at=record.finished_at,
-            module_status={module: report.state for module, report in record.modules.items()},
-            modules=record.modules,
-            summary=ScanSummary(
-                total_findings=len(record.findings),
-                by_severity={severity: severity_counts[severity] for severity in Severity},
-                by_category={category: category_counts[category] for category in ModuleName},
-            ),
-        )
+        return self.store.read(scan_id, build_status)
+
+
+def build_status(record: ScanRecord) -> ScanStatusResponse:
+    """Status without findings or the activity log, so polling stays cheap. Runs under the store lock."""
+    severity_counts = Counter(finding.severity for finding in record.findings)
+    category_counts = Counter(finding.category for finding in record.findings)
+    modules = {module: report.model_copy(deep=True) for module, report in record.modules.items()}
+    return ScanStatusResponse(
+        id=record.id,
+        target_url=record.target_url,
+        repo_path=record.repo_path,
+        inspection_mode=record.inspection_mode,
+        options=record.options.model_copy(),
+        status=record.status,
+        created_at=record.created_at,
+        finished_at=record.finished_at,
+        module_status={module: report.state for module, report in modules.items()},
+        modules=modules,
+        summary=ScanSummary(
+            total_findings=len(record.findings),
+            by_severity={severity: severity_counts[severity] for severity in Severity},
+            by_category={category: category_counts[category] for category in ModuleName},
+        ),
+        activity_count=len(record.activity) + record.activity_dropped,
+        last_activity=record.last_activity,
+    )
 
 
 def deduplicate(findings: Iterable[Finding]) -> List[Finding]:

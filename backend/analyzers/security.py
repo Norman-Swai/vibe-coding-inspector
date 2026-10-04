@@ -6,10 +6,11 @@ import json
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Optional, Pattern, Tuple
 from urllib.parse import urlparse
 
-from ..schemas import Finding, Location, ModuleName, Severity, Verification
+from ..schemas import ActivityKind, Finding, Location, ModuleName, Severity, Verification
 from .common import AnalyzerResult, Rule, code_only, is_comment_line, mask_secret, new_finding, numbered_lines, plural, truncate
 from .repo import RepoIndex
 from .web import FetchResult
@@ -327,11 +328,16 @@ NPM_AUDIT = Rule(
 )
 
 
+def secret_scannable(source) -> bool:
+    name = source.path.name
+    return not (name in _SECRET_SKIP_FILES or name.endswith(_SECRET_SKIP_SUFFIXES) or _ENV_FILE.match(name) or source.text is None)
+
+
 def scan_secrets(repo: RepoIndex) -> List[Finding]:
     findings: List[Finding] = []
     for source in repo.files:
         name = source.path.name
-        if name in _SECRET_SKIP_FILES or name.endswith(_SECRET_SKIP_SUFFIXES) or _ENV_FILE.match(name) or source.text is None:
+        if not secret_scannable(source):
             continue
         allow_generic = not (_EXAMPLE_FILE.search(name) or _TEST_PATH.search(source.rel))
         for line_no, line in enumerate(source.lines, start=1):
@@ -428,26 +434,44 @@ def scan_env_files(repo: RepoIndex) -> List[Finding]:
     return findings
 
 
-def run_npm_audit(repo: RepoIndex) -> Tuple[List[Finding], Optional[str]]:
-    """Returns findings and a coverage note explaining what ran (or why it did not)."""
+@dataclass
+class AuditRun:
+    """What happened when npm audit was (or was not) run, for coverage notes and the activity log."""
+
+    findings: List[Finding] = field(default_factory=list)
+    note: Optional[str] = None
+    command: Optional[str] = None
+    exit_code: Optional[int] = None
+    output: Optional[str] = None
+
+
+def run_npm_audit(repo: RepoIndex) -> AuditRun:
     root = repo.root
     if not (root / 'package.json').is_file():
-        return [], None
+        return AuditRun()
     if not any((root / name).is_file() for name in ('package-lock.json', 'npm-shrinkwrap.json')):
-        return [], 'npm audit skipped: package.json has no package-lock.json, so installed versions are unknown.'
+        return AuditRun(note='npm audit skipped: package.json has no package-lock.json, so installed versions are unknown.')
     npm = shutil.which('npm')
     if not npm:
-        return [], 'npm audit skipped: npm is not installed on the inspector host.'
+        return AuditRun(note='npm audit skipped: npm is not installed on the inspector host.')
+    command = f'npm audit --json   (cwd: {root})'
     try:
         completed = subprocess.run([npm, 'audit', '--json'], cwd=root, capture_output=True, text=True, timeout=90, check=False)
     except subprocess.TimeoutExpired:
-        return [], 'npm audit skipped: it did not finish within 90 seconds.'
+        return AuditRun(note='npm audit skipped: it did not finish within 90 seconds.', command=command, output='timed out after 90 s')
+    stderr = (completed.stderr or '').strip()
     try:
         payload = json.loads(completed.stdout or '{}')
     except json.JSONDecodeError:
-        return [], 'npm audit skipped: its output was not valid JSON.'
+        return AuditRun(
+            note='npm audit skipped: its output was not valid JSON.',
+            command=command,
+            exit_code=completed.returncode,
+            output=truncate((completed.stdout or '') + '\n' + stderr, 2000),
+        )
     if 'error' in payload:
-        return [], f'npm audit failed: {truncate(str(payload["error"].get("summary") or payload["error"]), 160)}'
+        summary = truncate(str(payload['error'].get('summary') or payload['error']), 160)
+        return AuditRun(note=f'npm audit failed: {summary}', command=command, exit_code=completed.returncode, output=truncate(json.dumps(payload['error'], indent=2), 2000))
 
     findings: List[Finding] = []
     for package, details in sorted(payload.get('vulnerabilities', {}).items()):
@@ -474,7 +498,46 @@ def run_npm_audit(repo: RepoIndex) -> Tuple[List[Finding], Optional[str]]:
                 captured='npm audit --json',
             )
         )
-    return findings, f'npm audit reported {plural(len(findings), "vulnerable package")}.'
+    metadata = payload.get('metadata', {})
+    output = '\n'.join(
+        [
+            f'vulnerabilities: {json.dumps(metadata.get("vulnerabilities", {}))}',
+            f'dependencies: {json.dumps(metadata.get("dependencies", {}))}',
+            *([f'packages: {", ".join(sorted(payload.get("vulnerabilities", {}))[:30])}'] if findings else []),
+            *([f'stderr: {truncate(stderr, 600)}'] if stderr else []),
+        ]
+    )
+    return AuditRun(
+        findings=findings,
+        note=f'npm audit reported {plural(len(findings), "vulnerable package")}.',
+        command=command,
+        exit_code=completed.returncode,
+        output=output,
+    )
+
+
+def _header_report(page: FetchResult) -> str:
+    """Every security-relevant response header and whether it was sent, as shown in the activity log."""
+    headers = page.headers
+    csp = headers.get('content-security-policy', '')
+    https = urlparse(page.url).scheme == 'https'
+
+    def state(name: str) -> str:
+        return f'{name}: {truncate(headers[name], 100)}' if headers.get(name) else f'{name}: (not sent)'
+
+    lines = [
+        state('content-security-policy'),
+        state('x-frame-options') + ('  [CSP frame-ancestors present]' if 'frame-ancestors' in csp.lower() else ''),
+        state('x-content-type-options'),
+        state('strict-transport-security') if https else 'strict-transport-security: not applicable (http)',
+        state('referrer-policy'),
+        state('permissions-policy'),
+        state('server'),
+        state('x-powered-by'),
+        state('access-control-allow-origin'),
+        f'set-cookie: {plural(len(page.set_cookies), "cookie")}',
+    ]
+    return '\n'.join(lines)
 
 
 def run_security_analysis(context: 'ScanContext') -> AnalyzerResult:
@@ -482,25 +545,56 @@ def run_security_analysis(context: 'ScanContext') -> AnalyzerResult:
     page = context.target_page()
     scanned_parts = ['1 page response']
     if page.ok and page.is_html:
-        result.findings.extend(check_response(page, context.is_public))
+        header_findings = check_response(page, context.is_public)
+        result.findings.extend(header_findings)
+        context.emit(MODULE, ActivityKind.check, f'Response headers of {page.url}: {plural(len(header_findings), "issue")}', _header_report(page))
     else:
-        result.notes.append(f'Header checks skipped: the target returned {page.status} {page.content_type or "(no content type)"} instead of an HTML page.')
+        note = f'Header checks skipped: the target returned {page.status} {page.content_type or "(no content type)"} instead of an HTML page.'
+        result.notes.append(note)
+        context.emit(MODULE, ActivityKind.warning, note)
     if urlparse(page.url).scheme == 'http' and not context.is_public:
         result.notes.append('HTTPS and HSTS checks do not apply to an http:// development server in localhost mode.')
 
-    if context.repo_path is not None:
+    if context.repo_path is None:
+        result.notes.append('Secret, code-sink and dependency checks skipped: no repository path was provided.')
+        context.emit(MODULE, ActivityKind.step, 'Repository checks skipped: no repository path was provided')
+    else:
         repo = context.repo()
-        result.findings.extend(scan_secrets(repo))
-        result.findings.extend(scan_sinks(repo))
-        result.findings.extend(scan_env_files(repo))
-        audit_findings, audit_note = run_npm_audit(repo)
-        result.findings.extend(audit_findings)
-        if audit_note:
-            result.notes.append(audit_note)
+        secrets = scan_secrets(repo)
+        result.findings.extend(secrets)
+        scannable = sum(1 for source in repo.files if secret_scannable(source))
+        context.emit(
+            MODULE,
+            ActivityKind.check,
+            f'Secret scan: {plural(scannable, "text file")} searched, {plural(len(secrets), "possible secret")}',
+            '\n'.join(f'{f.location.file}:{f.location.line_start}  {f.title}' for f in secrets[:20]) or None,
+        )
+        sinks = scan_sinks(repo)
+        result.findings.extend(sinks)
+        context.emit(
+            MODULE,
+            ActivityKind.check,
+            f'Risky code patterns: {plural(len(sinks), "file")} flagged across {len(SINK_RULES)} rules',
+            '\n'.join(f'{rule.title}: {sum(1 for f in sinks if f.title == rule.title)} file(s)' for rule, _, _ in SINK_RULES),
+        )
+        env_findings = scan_env_files(repo)
+        result.findings.extend(env_findings)
+        context.emit(MODULE, ActivityKind.check, f'.env files not covered by .gitignore: {len(env_findings)}')
+        audit = run_npm_audit(repo)
+        result.findings.extend(audit.findings)
+        if audit.command:
+            context.emit(
+                MODULE,
+                ActivityKind.command,
+                f'$ {audit.command} → exit {audit.exit_code if audit.exit_code is not None else "n/a"}, {plural(len(audit.findings), "vulnerable package")}',
+                audit.output,
+            )
+        elif audit.note:
+            context.emit(MODULE, ActivityKind.warning, audit.note)
+        if audit.note:
+            result.notes.append(audit.note)
         scanned_parts.append(plural(len(repo.files), 'file'))
         result.scanned = len(repo.files)
-    else:
-        result.notes.append('Secret, code-sink and dependency checks skipped: no repository path was provided.')
     result.scanned += 1
     result.scanned_label = ', '.join(scanned_parts)
     return result

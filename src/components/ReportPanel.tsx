@@ -2,26 +2,8 @@ import { Eye, EyeOff, FileDown, FileJson, Printer } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { apiClient, type ReportFormat } from '../api/client';
 import type { ScanStatusResponse } from '../contracts/finding';
+import { downloadText } from '../lib/download';
 import { ErrorNotice, Panel } from './ui';
-
-function download(content: string, format: ReportFormat, scan: ScanStatusResponse) {
-  let host = 'scan';
-  try {
-    host = new URL(scan.target_url).host.replace(/[^a-z0-9.-]+/gi, '-');
-  } catch {
-    // Keep the default name.
-  }
-  const stamp = new Date(scan.created_at).toISOString().slice(0, 16).replace(/[:T]/g, '-');
-  const blob = new Blob([content], { type: format === 'json' ? 'application/json' : 'text/markdown' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = `inspection-${host}-${stamp}.${format === 'json' ? 'json' : 'md'}`;
-  document.body.append(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
-}
 
 export function ReportPanel({ scan, findingsVersion }: { scan: ScanStatusResponse | null; findingsVersion: unknown }) {
   const [preview, setPreview] = useState<string | null>(null);
@@ -60,7 +42,8 @@ export function ReportPanel({ scan, findingsVersion }: { scan: ScanStatusRespons
     setBusy(format);
     setError(null);
     try {
-      download(await apiClient.getReport(scan.id, format), format, scan);
+      const report = await apiClient.getReport(scan.id, format);
+      downloadText(report, format === 'json' ? 'application/json' : 'text/markdown', scan, 'inspection', format === 'json' ? 'json' : 'md');
     } catch (reportError) {
       setError(reportError instanceof Error ? reportError.message : 'Export failed.');
     } finally {
@@ -70,8 +53,7 @@ export function ReportPanel({ scan, findingsVersion }: { scan: ScanStatusRespons
 
   return (
     <Panel
-      id="report"
-      title="Report"
+      title="Export report"
       description={
         !scan
           ? 'Export findings, coverage and review decisions once a scan has run.'

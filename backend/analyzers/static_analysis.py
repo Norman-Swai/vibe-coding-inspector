@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, List, Optional, Tuple
 
-from ..schemas import Finding, Location, ModuleName, Severity, Verification
+from ..schemas import ActivityKind, Finding, Location, ModuleName, Severity, Verification
 from .common import AnalyzerResult, Rule, code_only, is_comment_line, new_finding, numbered_lines, plural
 from .repo import RepoIndex, SourceFile
 
@@ -175,23 +175,47 @@ def _todo_markers(source: SourceFile) -> Optional[Finding]:
     return _file_finding(TODO_MARKERS, source, lines) if lines else None
 
 
-CHECKS = [_unresolved_imports, _interval_without_clear, _listeners_without_remove, _debugger_statements, _todo_markers]
+CHECKS = [
+    (_unresolved_imports, UNRESOLVED_IMPORT),
+    (_interval_without_clear, INTERVAL_WITHOUT_CLEAR),
+    (_listeners_without_remove, LISTENER_WITHOUT_REMOVE),
+    (_debugger_statements, DEBUGGER_STATEMENT),
+    (_todo_markers, TODO_MARKERS),
+]
 
 
 def analyse_repo(repo: RepoIndex) -> Tuple[List[Finding], int]:
+    findings, scanned, _ = analyse_repo_with_stats(repo)
+    return findings, scanned
+
+
+def analyse_repo_with_stats(repo: RepoIndex) -> Tuple[List[Finding], int, List[str]]:
+    """Findings, number of source files read, and one summary line per check for the activity log."""
     findings: List[Finding] = []
     sources = [source for source in repo.with_suffixes(CODE) if source.text is not None]
+    per_rule: dict = {rule.title: ([], 0) for _, rule in CHECKS}
     for source in sources:
-        for check in CHECKS:
+        for check, rule in CHECKS:
             finding = check(source)
             if finding:
                 findings.append(finding)
-    return findings, len(sources)
+                files, hits = per_rule[rule.title]
+                per_rule[rule.title] = ([*files, source.rel], hits + finding.evidence.occurrences)
+    js = [source for source in sources if source.suffix in JS]
+    py = [source for source in sources if source.suffix in PY]
+    imports = sum(len(_JS_IMPORT.findall(source.text or '')) for source in js) + sum(len(_PY_RELATIVE_IMPORT.findall(source.text or '')) for source in py)
+    stats = [f'Files read: {len(sources)} ({len(js)} JS/TS, {len(py)} Python, {len(sources) - len(js) - len(py)} other)', f'Relative imports resolved on disk: {imports}']
+    stats += [
+        f'{title}: {len(files)} file(s), {hits} occurrence(s)' + (f' — {", ".join(files[:5])}{" …" if len(files) > 5 else ""}' if files else '')
+        for title, (files, hits) in per_rule.items()
+    ]
+    return findings, len(sources), stats
 
 
 def run_static_analysis(context: 'ScanContext') -> AnalyzerResult:
     repo = context.repo()
-    findings, scanned = analyse_repo(repo)
+    findings, scanned, stats = analyse_repo_with_stats(repo)
+    context.emit(MODULE, ActivityKind.check, f'Static checks over {plural(scanned, "source file")}: {plural(len(findings), "finding")}', '\n'.join(stats))
     return AnalyzerResult(
         findings=findings,
         scanned=scanned,

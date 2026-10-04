@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 
 from bs4 import Comment, NavigableString
 
-from ..schemas import Location, ModuleName, Severity, Verification
+from ..schemas import ActivityKind, Location, ModuleName, Severity, Verification
 from .common import AnalyzerResult, Rule, element_line, new_finding, plural, start_tag, truncate
 from .web import CrawlResult, FetchResult
 
@@ -124,12 +124,21 @@ def run_runtime_analysis(context: 'ScanContext') -> AnalyzerResult:
     html_pages = crawl.html_pages
     result.scanned_label = f'{plural(len(crawl.pages), "URL")} requested, {plural(len(html_pages), "HTML page")} inspected'
 
-    result.findings.extend(_broken_links(crawl, context.options.timeout_seconds))
+    broken = _broken_links(crawl, context.options.timeout_seconds)
+    result.findings.extend(broken)
+    failing = [page for page in crawl.pages if not page.ok and page.status not in _AUTH_STATUSES]
+    context.emit(
+        MODULE,
+        ActivityKind.check,
+        f'Link check: {plural(len(crawl.pages), "URL")} requested, {len(failing)} broken or failing',
+        '\n'.join(page.describe() for page in failing[:20]) or None,
+    )
 
     grouped: dict[Rule, Hits] = {rule: [] for rule in (MISSING_TITLE, MISSING_LANG, MISSING_VIEWPORT, UNLABELED_CONTROLS, IMAGES_WITHOUT_ALT, MIXED_CONTENT)}
     for page in html_pages:
         soup = page.soup
         head = soup.head or soup.find('html') or soup
+        before = {rule: len(hits) for rule, hits in grouped.items()}
         if not (soup.title and soup.title.get_text(strip=True)):
             grouped[MISSING_TITLE].append((page.url, soup.title or head))
         html = soup.find('html')
@@ -146,6 +155,7 @@ def run_runtime_analysis(context: 'ScanContext') -> AnalyzerResult:
         error_finding = _error_text(page)
         if error_finding:
             result.findings.append(error_finding)
+        context.emit(MODULE, ActivityKind.check, f'Inspected {urlparse(page.url).path or "/"}', _page_summary(grouped, before, error_finding is not None, urlparse(page.url).scheme == 'https'))
 
     for rule, hits in grouped.items():
         if hits:
@@ -153,6 +163,31 @@ def run_runtime_analysis(context: 'ScanContext') -> AnalyzerResult:
 
     result.notes.extend(_coverage_notes(crawl, context.options.max_pages))
     return result
+
+
+_PAGE_CHECK_LABELS = {
+    MISSING_TITLE: 'title',
+    MISSING_LANG: 'lang attribute',
+    MISSING_VIEWPORT: 'viewport meta',
+    UNLABELED_CONTROLS: 'unlabelled form controls',
+    IMAGES_WITHOUT_ALT: 'images without alt',
+    MIXED_CONTENT: 'mixed-content resources',
+}
+
+
+def _page_summary(grouped: dict, before: dict, error_text: bool, https: bool) -> str:
+    """One line per check run on a page, e.g. 'title: missing' or 'unlabelled form controls: 2'."""
+    lines = []
+    for rule, label in _PAGE_CHECK_LABELS.items():
+        added = len(grouped[rule]) - before[rule]
+        if rule in (MISSING_TITLE, MISSING_LANG, MISSING_VIEWPORT):
+            lines.append(f'{label}: {"missing" if added else "ok"}')
+        elif rule is MIXED_CONTENT and not https:
+            lines.append(f'{label}: not applicable (http page)')
+        else:
+            lines.append(f'{label}: {added}')
+    lines.append(f'error or stack-trace text: {"found" if error_text else "none"}')
+    return '\n'.join(lines)
 
 
 def _broken_links(crawl: CrawlResult, timeout: float) -> list:

@@ -1,4 +1,4 @@
-import type { Finding, ScanStatusResponse } from '../contracts/finding';
+import type { ActivityEvent, Finding, ScanStatusResponse } from '../contracts/finding';
 
 /** jsdom has no matchMedia. Default: light, wide, mouse-driven screen. */
 export function installMatchMedia(matches: (query: string) => boolean = () => false) {
@@ -52,10 +52,33 @@ export function makeScan(overrides: Partial<ScanStatusResponse> = {}): ScanStatu
       by_severity: { critical: 0, high: 0, medium: 1, low: 0, info: 0 },
       by_category: { runtime: 1, static: 0, security: 0, compliance: 0 },
     },
+    activity_count: 0,
+    last_activity: null,
     ...overrides,
   };
 }
 
 export function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+}
+
+export function makeEvent(overrides: Partial<ActivityEvent> & Pick<ActivityEvent, 'seq'>): ActivityEvent {
+  return { at_ms: overrides.seq * 10, module: null, kind: 'step', message: `event ${overrides.seq}`, output: null, request: null, ...overrides };
+}
+
+/** Routes fetch() calls to handlers by URL, so tests read like the API they exercise. */
+export function mockApi(routes: Record<string, (url: string, init?: RequestInit) => Response | Promise<Response>>) {
+  return async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const key = Object.keys(routes)
+      .sort((a, b) => b.length - a.length)
+      .find((pattern) => url.includes(pattern));
+    if (!key) throw new Error(`Unexpected request: ${url}`);
+    return routes[key](url, init);
+  };
+}
+
+export function goTo(hash: string) {
+  window.location.hash = hash;
+  window.dispatchEvent(new HashChangeEvent('hashchange'));
 }

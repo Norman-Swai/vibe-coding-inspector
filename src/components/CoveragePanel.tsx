@@ -1,35 +1,11 @@
-import { Radar } from 'lucide-react';
 import type { ScanStatusResponse } from '../contracts/finding';
-import { formatDuration, formatTime, MODULE_META, MODULES } from '../lib/meta';
-import { EmptyState, ErrorNotice, Panel, StateBadge, Tag } from './ui';
+import { formatDuration, MODULE_META, MODULES } from '../lib/meta';
+import { Panel, StateBadge } from './ui';
 
-export function CoveragePanel({ scan, error }: { scan: ScanStatusResponse | null; error: string | null }) {
-  if (!scan) {
-    return (
-      <Panel title="Coverage" description="What each module checked in the current scan.">
-        {error ? <ErrorNotice>{error}</ErrorNotice> : <EmptyState icon={Radar} title="No scan yet">Start a scan to see each module's progress and what it covered.</EmptyState>}
-      </Panel>
-    );
-  }
-
-  const finished = MODULES.filter((module) => ['done', 'failed', 'skipped'].includes(scan.modules[module].state)).length;
-  const running = scan.status === 'running';
-  const totalMs = scan.finished_at ? new Date(scan.finished_at).getTime() - new Date(scan.created_at).getTime() : null;
-
+/** What each module covered, skipped or failed on, with its coverage notes. */
+export function CoveragePanel({ scan }: { scan: ScanStatusResponse }) {
   return (
-    <Panel
-      title="Coverage"
-      description={
-        <>
-          <span className="break-anywhere">{scan.target_url}</span> · {scan.inspection_mode === 'localhost' ? 'Localhost' : 'Public site'} · started {formatTime(scan.created_at)}
-        </>
-      }
-      actions={running ? <Tag tone="warning">Running {finished}/{MODULES.length}</Tag> : <Tag tone="success">Completed in {formatDuration(totalMs)}</Tag>}
-    >
-      <div className="progress" role="progressbar" aria-label="Modules finished" aria-valuemin={0} aria-valuemax={MODULES.length} aria-valuenow={finished}>
-        <span style={{ width: `${(finished / MODULES.length) * 100}%` }} />
-      </div>
-      {error && <ErrorNotice>{error}</ErrorNotice>}
+    <Panel title="Coverage by module" description="What each module looked at, and anything it skipped or could not do." className="coverage-panel">
       <ul className="module-list" role="list">
         {MODULES.map((module) => {
           const report = scan.modules[module];
@@ -51,7 +27,7 @@ export function CoveragePanel({ scan, error }: { scan: ScanStatusResponse | null
               </div>
               {report.error && <p className="module-error">{report.error}</p>}
               {report.notes.length > 0 && (
-                <details className="module-notes">
+                <details className="module-notes" open={report.state === 'skipped' || undefined}>
                   <summary>
                     {report.state === 'skipped' ? 'Why skipped' : 'Coverage notes'} ({report.notes.length})
                   </summary>

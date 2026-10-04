@@ -129,3 +129,50 @@ def test_cors_does_not_trust_arbitrary_websites():
     assert 'access-control-allow-origin' not in response.headers
     allowed = client.options('/api/scans', headers={'Origin': 'http://localhost:5173', 'Access-Control-Request-Method': 'POST'})
     assert allowed.headers['access-control-allow-origin'] == 'http://localhost:5173'
+
+
+def test_activity_log_records_requests_checks_and_lifecycle(site, repo):
+    site.add('/', page('<a href="/about">About</a><a href="/missing">Gone</a>'))
+    site.add('/about', page('About'))
+    status = wait(start(site.url + '/', str(repo)))
+    scan_id = status['id']
+
+    activity = client.get(f'/api/scans/{scan_id}/activity').json()
+    events = activity['events']
+    assert status['activity_count'] == len(events) == activity['next_seq']
+    assert status['last_activity'].startswith('Scan completed in')
+    assert [event['seq'] for event in events] == list(range(1, len(events) + 1))
+    assert events[0]['message'].startswith(f'Scan started: {site.url}/')
+
+    requests_sent = [event['request'] for event in events if event['request']]
+    assert {(r['url'], r['status']) for r in requests_sent} >= {(site.url + '/', 200), (site.url + '/about', 200), (site.url + '/missing', 404)}
+    assert all(r['duration_ms'] is not None for r in requests_sent)
+
+    by_module = {}
+    for event in events:
+        by_module.setdefault(event['module'], []).append((event['kind'], event['message']))
+    for module in ('runtime', 'static', 'security', 'compliance'):
+        kinds = [kind for kind, _ in by_module[module]]
+        assert kinds[0] == 'step' and kinds[-1] == 'result' and 'check' in kinds, module
+    header_check = next(event for event in events if event['message'].startswith('Response headers of'))
+    assert 'content-security-policy: (not sent)' in header_check['output']
+    assert any(message.startswith('Link check: 3 URLs requested, 1 broken') for _, message in by_module['runtime'])
+
+    tail = client.get(f'/api/scans/{scan_id}/activity?since={len(events) - 1}').json()
+    assert [event['seq'] for event in tail['events']] == [len(events)]
+    assert client.get(f'/api/scans/{scan_id}/activity?since={len(events)}').json() == {'events': [], 'next_seq': len(events), 'dropped': 0}
+
+    markdown = client.get(f'/api/scans/{scan_id}/report').text
+    assert '## What was done' in markdown and '- HTTP requests sent: 3' in markdown
+
+
+def test_failed_module_is_logged_as_an_error():
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0))
+        port = sock.getsockname()[1]
+    scan_id = wait(start(f'http://127.0.0.1:{port}/'))['id']
+    events = client.get(f'/api/scans/{scan_id}/activity').json()['events']
+    errors = [event for event in events if event['kind'] == 'error']
+    assert {event['module'] for event in errors} >= {'runtime', 'security', 'compliance'}
+    assert all('connection refused' in event['message'] for event in errors)
+    assert any(event['kind'] == 'warning' and event['request'] and event['request']['error'] for event in events)

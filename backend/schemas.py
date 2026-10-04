@@ -128,6 +128,46 @@ class ScanRequest(ScanOptions):
     inspection_mode: InspectionMode = InspectionMode.localhost
 
 
+class ActivityKind(str, Enum):
+    step = 'step'
+    request = 'request'
+    check = 'check'
+    command = 'command'
+    result = 'result'
+    warning = 'warning'
+    error = 'error'
+
+
+class RequestInfo(BaseModel):
+    method: str = 'GET'
+    url: str
+    final_url: Optional[str] = None
+    status: Optional[int] = None
+    content_type: Optional[str] = None
+    bytes: Optional[int] = None
+    duration_ms: Optional[int] = None
+    error: Optional[str] = None
+
+
+class ActivityEvent(BaseModel):
+    """One thing the inspector did: a request it sent, a check it evaluated, a command it ran, and the output."""
+
+    seq: int
+    at_ms: int = Field(description='Milliseconds since the scan started.')
+    # None means shared work done once for every module (HTTP client, crawler, repository index).
+    module: Optional[ModuleName] = None
+    kind: ActivityKind
+    message: str
+    output: Optional[str] = None
+    request: Optional[RequestInfo] = None
+
+
+class ActivityPage(BaseModel):
+    events: List[ActivityEvent]
+    next_seq: int = Field(description='Pass as ?since= to fetch only newer events.')
+    dropped: int = Field(0, description='Events not stored because the per-scan cap was reached.')
+
+
 class ModuleReport(BaseModel):
     state: ModuleState = ModuleState.queued
     started_at: Optional[str] = None
@@ -150,6 +190,9 @@ class ScanRecord(BaseModel):
     finished_at: Optional[str] = None
     modules: Dict[ModuleName, ModuleReport]
     findings: List[Finding] = Field(default_factory=list)
+    activity: List[ActivityEvent] = Field(default_factory=list)
+    activity_dropped: int = 0
+    last_activity: Optional[str] = None
 
 
 class ScanStartResponse(BaseModel):
@@ -175,3 +218,5 @@ class ScanStatusResponse(BaseModel):
     module_status: Dict[ModuleName, ModuleState]
     modules: Dict[ModuleName, ModuleReport]
     summary: ScanSummary
+    activity_count: int = 0
+    last_activity: Optional[str] = None

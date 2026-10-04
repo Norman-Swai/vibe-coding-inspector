@@ -5,7 +5,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, List, Optional, Tuple
 from urllib.parse import urlparse
 
-from ..schemas import Finding, Location, ModuleName, Severity, Verification
+from ..schemas import ActivityKind, Finding, Location, ModuleName, Severity, Verification
 from .common import AnalyzerResult, Rule, element_line, new_finding, plural
 from .web import Anchor, CrawlResult
 
@@ -94,14 +94,17 @@ def _links_evidence(crawl: CrawlResult, requirement: Requirement) -> str:
     )
 
 
-def check_links(crawl: CrawlResult) -> Tuple[List[Finding], List[str]]:
+def check_links(crawl: CrawlResult) -> Tuple[List[Finding], List[str], List[str]]:
+    """Findings for missing requirements, plus 'name → url' for each found one and the names of missing ones."""
     findings: List[Finding] = []
     found: List[str] = []
+    missing: List[str] = []
     for requirement in REQUIREMENTS:
         anchor = _match(requirement, crawl.anchors)
         if anchor:
             found.append(f'{requirement.name} → {anchor.href}')
             continue
+        missing.append(requirement.name)
         rule = replace(MISSING_LINK, title=f'No {requirement.name} link found', description=f'{MISSING_LINK.description} {requirement.why}')
         findings.append(
             new_finding(
@@ -113,7 +116,7 @@ def check_links(crawl: CrawlResult) -> Tuple[List[Finding], List[str]]:
                 captured=f'{plural(len(crawl.html_pages), "HTML page")} crawled from {crawl.start_url}',
             )
         )
-    return findings, found
+    return findings, found, missing
 
 
 def check_cookie_consent(crawl: CrawlResult) -> Tuple[Optional[Finding], str]:
@@ -160,10 +163,20 @@ def check_cookie_consent(crawl: CrawlResult) -> Tuple[Optional[Finding], str]:
 
 def run_compliance_analysis(context: 'ScanContext') -> AnalyzerResult:
     crawl = context.crawl()
-    findings, found = check_links(crawl)
+    findings, found, missing = check_links(crawl)
+    unique_links = len({(anchor.raw_href, anchor.text) for anchor in crawl.anchors})
+    context.emit(
+        MODULE,
+        ActivityKind.check,
+        f'Searched {plural(unique_links, "unique link")} on {plural(len(crawl.html_pages), "page")} for {len(REQUIREMENTS)} required pages: {len(found)} found',
+        '\n'.join(
+            [*(f'found    {item}' for item in found), *(f'missing  {name}' for name in missing)]
+        ),
+    )
     consent_finding, consent_note = check_cookie_consent(crawl)
     if consent_finding:
         findings.append(consent_finding)
+    context.emit(MODULE, ActivityKind.check, consent_note, consent_finding.evidence.snippet if consent_finding else None)
     notes = [*(f'Found {item}' for item in found), consent_note]
     if crawl.unchecked:
         notes.append('Some pages were not crawled because of the page limit; links on them were not searched.')

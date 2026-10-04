@@ -53,6 +53,7 @@ describe('settings drawer', () => {
   });
 
   it('feeds scan limits into the launch form and does not duplicate the controls there', async () => {
+    window.location.hash = '#/launch';
     const { user, dialog } = await openSettings();
     const maxPages = within(dialog).getByLabelText('Max pages to crawl');
     await user.clear(maxPages);

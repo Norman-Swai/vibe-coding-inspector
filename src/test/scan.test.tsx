@@ -28,6 +28,7 @@ describe('launch form', () => {
       return jsonResponse(makeScan());
     });
     vi.stubGlobal('fetch', fetchMock);
+    window.location.hash = '#/launch';
     const user = userEvent.setup();
     render(<App />);
 
@@ -48,10 +49,12 @@ describe('launch form', () => {
       max_pages: 12,
       timeout_seconds: 5,
     });
-    expect(await screen.findByText('Completed in 1.0 s')).toBeInTheDocument();
+    expect(await screen.findByText('Scan complete: 1 finding')).toBeInTheDocument();
+    expect(window.localStorage.getItem('vci-last-scan')).toBe('scan-1');
   });
 
   it('hides the repository field in public mode', async () => {
+    window.location.hash = '#/launch';
     const user = userEvent.setup();
     render(<App />);
     await user.click(screen.getByRole('radio', { name: 'Public site' }));

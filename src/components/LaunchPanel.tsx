@@ -24,17 +24,42 @@ export function validateRepoPath(path: string): string | null {
   return value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value) ? null : 'Use an absolute path, for example /home/me/my-app.';
 }
 
-export function LaunchPanel({ busy, error, onStart }: { busy: boolean; error: string | null; onStart: (request: ScanRequest) => void }) {
+/** The form's contents. Owned by the app shell so they survive switching views while a scan runs. */
+export interface LaunchDraft {
+  mode: InspectionMode;
+  targetUrl: string;
+  repoPath: string;
+  authorized: boolean;
+}
+
+export const EMPTY_DRAFT: LaunchDraft = { mode: 'localhost', targetUrl: 'http://localhost:3000', repoPath: '', authorized: false };
+
+export function LaunchPanel({
+  draft,
+  onDraftChange,
+  busy,
+  running,
+  error,
+  onStart,
+}: {
+  draft: LaunchDraft;
+  onDraftChange: (patch: Partial<LaunchDraft>) => void;
+  busy: boolean;
+  running: boolean;
+  error: string | null;
+  onStart: (request: ScanRequest) => void;
+}) {
   const { settings, open } = useSettings();
-  const [mode, setMode] = useState<InspectionMode>('localhost');
-  const [targetUrl, setTargetUrl] = useState('http://localhost:3000');
-  const [repoPath, setRepoPath] = useState('');
-  const [authorized, setAuthorized] = useState(false);
+  const { mode, targetUrl, repoPath, authorized } = draft;
+  const setMode = (value: InspectionMode) => onDraftChange({ mode: value });
+  const setTargetUrl = (value: string) => onDraftChange({ targetUrl: value });
+  const setRepoPath = (value: string) => onDraftChange({ repoPath: value });
+  const setAuthorized = (value: boolean) => onDraftChange({ authorized: value });
   const [submitted, setSubmitted] = useState(false);
 
   const targetError = validateTarget(targetUrl, mode);
   const repoError = mode === 'localhost' ? validateRepoPath(repoPath) : null;
-  const canSubmit = !targetError && !repoError && authorized && !busy;
+  const canSubmit = !targetError && !repoError && authorized && !busy && !running;
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -51,7 +76,7 @@ export function LaunchPanel({ busy, error, onStart }: { busy: boolean; error: st
   }
 
   return (
-    <Panel id="scan" title="New scan" description="Point the inspector at a running app you are allowed to test." className="launch-panel">
+    <Panel title="Target" description="Point the inspector at a running app you are allowed to test." className="launch-panel">
       <form className="form" onSubmit={submit} noValidate>
         <SegmentedControl
           label="Mode"
@@ -111,9 +136,9 @@ export function LaunchPanel({ busy, error, onStart }: { busy: boolean; error: st
               Change
             </button>
           </p>
-          <button type="submit" className="button button-primary" disabled={busy} aria-disabled={!canSubmit}>
-            <Play size={16} aria-hidden="true" />
-            {busy ? 'Starting…' : 'Start scan'}
+          <button type="submit" className="button button-primary" disabled={busy || running} aria-disabled={!canSubmit}>
+            {running ? <span className="spinner" aria-hidden="true" /> : <Play size={16} aria-hidden="true" />}
+            {busy ? 'Starting…' : running ? 'Scan in progress…' : 'Start scan'}
           </button>
         </div>
         {error && <ErrorNotice>{error}</ErrorNotice>}

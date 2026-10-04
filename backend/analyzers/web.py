@@ -8,7 +8,7 @@ from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 from urllib.parse import urldefrag, urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
@@ -16,7 +16,8 @@ import requests
 from bs4 import BeautifulSoup
 from requests.structures import CaseInsensitiveDict
 
-from .common import ScanError, start_tag
+from ..schemas import ActivityKind
+from .common import ScanError, plural, start_tag
 
 USER_AGENT = 'VibeCodingInspector/0.2 (+passive inspection)'
 MAX_BODY_BYTES = 2_000_000
@@ -66,8 +67,9 @@ class FetchResult:
 class PageFetcher:
     """Per-scan HTTP client. Each URL is fetched at most once and shared between modules (single flight)."""
 
-    def __init__(self, timeout: float) -> None:
+    def __init__(self, timeout: float, on_result: Optional[Callable[['FetchResult'], None]] = None) -> None:
         self.timeout = timeout
+        self._on_result = on_result
         self._lock = threading.Lock()
         self._cache: Dict[str, Future] = {}
         self._local = threading.local()
@@ -89,6 +91,8 @@ class PageFetcher:
                 future.set_exception(exc)
                 raise
             future.set_result(result)
+            if self._on_result is not None:
+                self._on_result(result)
             if result.url != url:
                 with self._lock:
                     self._cache.setdefault(result.url, future)
@@ -221,11 +225,20 @@ class CrawlResult:
         return self._referrers.get(url, [])
 
 
-def crawl(fetcher: PageFetcher, start_url: str, max_pages: int, respect_robots: bool) -> CrawlResult:
+Emit = Callable[..., None]
+
+
+def _no_emit(kind: ActivityKind, message: str, output: Optional[str] = None) -> None:
+    pass
+
+
+def crawl(fetcher: PageFetcher, start_url: str, max_pages: int, respect_robots: bool, emit: Emit = _no_emit) -> CrawlResult:
     """Breadth-first, same-origin crawl. Each level is fetched concurrently; at most ``max_pages`` URLs are requested."""
     start = normalize_url(start_url)
+    emit(ActivityKind.step, f'Crawl started at {start} (limit {max_pages} URLs{", respecting robots.txt" if respect_robots else ""})')
     first = fetcher.get(start)
     if first.error:
+        emit(ActivityKind.error, f'Target unreachable: {first.error}')
         raise ScanError(f'Could not reach {start}: {first.error}')
 
     origin = urlparse(first.url).netloc
@@ -234,12 +247,13 @@ def crawl(fetcher: PageFetcher, start_url: str, max_pages: int, respect_robots: 
     anchors: List[Anchor] = []
     unchecked: List[str] = []
     robots_skipped: List[str] = []
-    robots = _load_robots(fetcher, first.url) if respect_robots else None
+    robots = _load_robots(fetcher, first.url, emit) if respect_robots else None
 
     def collect(page: FetchResult) -> List[str]:
         if not (page.ok and page.is_html and urlparse(page.url).netloc == origin):
             return []
         discovered: List[str] = []
+        anchors_before = len(anchors)
         for tag in page.soup.find_all('a', href=True):
             raw = tag['href'].strip()
             if not raw or raw.startswith('#'):
@@ -257,6 +271,12 @@ def crawl(fetcher: PageFetcher, start_url: str, max_pages: int, respect_robots: 
                 robots_skipped.append(absolute)
             else:
                 discovered.append(absolute)
+        found = len(anchors) - anchors_before
+        emit(
+            ActivityKind.step,
+            f'Parsed {urlparse(page.url).path or "/"}: {plural(found, "link")}, {len(discovered)} new same-origin URL{"" if len(discovered) == 1 else "s"} queued',
+            '\n'.join(discovered[:20]) + (f'\n… and {len(discovered) - 20} more' if len(discovered) > 20 else '') if discovered else None,
+        )
         return discovered
 
     frontier = collect(first)
@@ -273,13 +293,24 @@ def crawl(fetcher: PageFetcher, start_url: str, max_pages: int, respect_robots: 
                 pages.append(page)
                 frontier.extend(collect(page))
 
+    if unchecked:
+        emit(ActivityKind.warning, f'Page limit of {max_pages} reached: {plural(len(unchecked), "same-origin URL")} not requested', '\n'.join(unchecked[:30]))
+    if robots_skipped:
+        emit(ActivityKind.warning, f'robots.txt disallows {plural(len(robots_skipped), "URL")}; not requested', '\n'.join(robots_skipped[:30]))
+    html = sum(1 for page in pages if page.ok and page.is_html)
+    failed = sum(1 for page in pages if not page.ok)
+    emit(ActivityKind.result, f'Crawl finished: {plural(len(pages), "URL")} requested, {plural(html, "HTML page")}, {failed} failed')
     return CrawlResult(start, origin, pages, anchors, unchecked, robots_skipped)
 
 
-def _load_robots(fetcher: PageFetcher, base_url: str) -> Optional[RobotFileParser]:
+def _load_robots(fetcher: PageFetcher, base_url: str, emit: Emit = _no_emit) -> Optional[RobotFileParser]:
     result = fetcher.get(urljoin(base_url, '/robots.txt'))
     if not result.ok or not result.text:
+        emit(ActivityKind.check, f'robots.txt not found ({result.status or result.error}); all paths allowed')
         return None
     parser = RobotFileParser()
-    parser.parse(result.text.splitlines())
+    lines = result.text.splitlines()
+    parser.parse(lines)
+    rules = [line.strip() for line in lines if line.strip().lower().startswith(('disallow', 'allow', 'user-agent'))]
+    emit(ActivityKind.check, f'robots.txt loaded: {plural(len(rules), "rule")}', '\n'.join(rules[:40]))
     return parser

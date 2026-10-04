@@ -12,6 +12,8 @@ from fastapi.responses import Response
 from .orchestrator import orchestrator, store
 from .schemas import (
     SEVERITY_ORDER,
+    ActivityKind,
+    ActivityPage,
     FixReviewDecision,
     FixReviewState,
     Finding,
@@ -76,7 +78,16 @@ def get_scan(scan_id: str) -> ScanStatusResponse:
 @app.get('/api/scans/{scan_id}/findings', response_model=list[Finding])
 def get_findings(scan_id: str) -> list[Finding]:
     try:
-        return store.get(scan_id).findings
+        return store.read(scan_id, lambda record: [finding.model_copy(deep=True) for finding in record.findings])
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail='Scan not found') from exc
+
+
+@app.get('/api/scans/{scan_id}/activity', response_model=ActivityPage)
+def get_activity(scan_id: str, since: int = Query(0, ge=0, description='Return events with seq greater than this.')) -> ActivityPage:
+    """Everything the inspector did during the scan: requests, checks, commands and their output."""
+    try:
+        return store.activity_since(scan_id, since)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail='Scan not found') from exc
 
@@ -168,6 +179,27 @@ def render_markdown(record: ScanRecord) -> str:
         duration = f'{report.duration_ms} ms' if report.duration_ms is not None else '—'
         notes = '; '.join([*([f'ERROR: {report.error}'] if report.error else []), *report.notes]) or '—'
         lines.append(f'| {module.value} | {report.state.value} | {scanned} | {duration} | {notes.replace("|", "/")} |')
+
+    commands = [event for event in record.activity if event.kind == ActivityKind.command]
+    checks = [event for event in record.activity if event.kind == ActivityKind.check]
+    requests_sent = [event for event in record.activity if event.request is not None]
+    lines.extend(
+        [
+            '',
+            '## What was done',
+            '',
+            f'- HTTP requests sent: {len(requests_sent)}',
+            f'- Checks evaluated: {len(checks)}',
+            f'- Commands run: {len(commands)}',
+            *([f'- Activity events not recorded (cap reached): {record.activity_dropped}'] if record.activity_dropped else []),
+            '',
+        ]
+    )
+    for event in commands:
+        lines.extend([f'**{event.message}**', '', _fence(event.output or '(no output)'), ''])
+    if checks:
+        lines.extend(['| Module | Check |', '| --- | --- |'])
+        lines.extend(f'| {event.module.value if event.module else "shared"} | {event.message.replace("|", "/")} |' for event in checks)
 
     lines.extend(['', '## Findings', ''])
     if not findings:

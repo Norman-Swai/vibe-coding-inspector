@@ -1,8 +1,18 @@
-import type { Finding, FixReviewState, ReviewState, ScanRequest, ScanStatusResponse } from '../contracts/finding';
+import type { ActivityPage, Finding, FixReviewState, ReviewState, ScanRequest, ScanStatusResponse } from '../contracts/finding';
 
 // The only module that talks to the backend.
 
 type ValidationDetail = { loc?: (string | number)[]; msg?: string };
+
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
 
 async function errorMessage(response: Response): Promise<string> {
   const text = await response.text();
@@ -23,7 +33,7 @@ async function send(path: string, init: RequestInit = {}): Promise<Response> {
     ...init,
     headers: { ...(init.body ? { 'Content-Type': 'application/json' } : {}), ...init.headers },
   });
-  if (!response.ok) throw new Error(await errorMessage(response));
+  if (!response.ok) throw new ApiError(await errorMessage(response), response.status);
   return response;
 }
 
@@ -42,6 +52,9 @@ export const apiClient = {
   },
   getFindings(scanId: string) {
     return json<Finding[]>(`/scans/${encodeURIComponent(scanId)}/findings`);
+  },
+  getActivity(scanId: string, since = 0) {
+    return json<ActivityPage>(`/scans/${encodeURIComponent(scanId)}/activity?since=${since}`);
   },
   updateReview(findingId: string, review: ReviewState) {
     return json<Finding>(`/findings/${encodeURIComponent(findingId)}/review`, { method: 'PATCH', body: JSON.stringify(review) });

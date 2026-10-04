@@ -78,13 +78,12 @@ export function FindingsPanel({
   let empty: ReactNode = null;
   if (!scan) empty = <EmptyState icon={ListChecks} title="No findings yet">Findings appear here, with their evidence, as soon as each module reports.</EmptyState>;
   else if (findings.length === 0 && running) empty = <EmptyState icon={Hourglass} title="Scanning…">Findings appear as each module finishes.</EmptyState>;
-  else if (findings.length === 0) empty = <EmptyState icon={CheckCircle2} title="No issues found">None of the modules that ran reported an issue. Check Coverage for anything that was skipped or failed.</EmptyState>;
+  else if (findings.length === 0) empty = <EmptyState icon={CheckCircle2} title="No issues found">None of the modules that ran reported an issue. Analytics shows what was checked, skipped or failed.</EmptyState>;
 
   return (
     <Panel
-      id="findings"
-      title="Findings"
-      description={scan ? `${findings.length} found${running ? ' so far' : ''} · sorted by severity` : 'Evidence-backed issues from the latest scan.'}
+      title="Observations"
+      description={scan ? `${findings.length} found${running ? ' so far' : ''} · sorted by severity · select one to see its artifacts` : 'Evidence-backed issues from the latest scan.'}
       className="findings-panel"
     >
       {empty ?? (
