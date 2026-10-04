@@ -145,6 +145,11 @@ export function formatTime(iso?: string | null): string {
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 }
 
+/** "Runtime, Static code, and Security" rather than "Runtime and Static code and Security". */
+export function listOf(items: string[]): string {
+  return new Intl.ListFormat('en', { type: 'conjunction' }).format(items);
+}
+
 // Defence in depth: the backend masks secrets, but never render a credential-shaped string even if one slips through.
 const SECRET_SHAPES = [
   /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g,

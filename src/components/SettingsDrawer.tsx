@@ -61,7 +61,9 @@ export function SettingsDrawer() {
   useEffect(() => {
     if (!isOpen) return;
     returnFocus.current = document.activeElement as HTMLElement | null;
-    const target = panelRef.current?.querySelector<HTMLElement>(`#${SECTION_IDS[section]} input, #${SECTION_IDS[section]} button`);
+    // The first control of the requested section; for a radio group that is the checked option, so Space changes nothing.
+    const id = SECTION_IDS[section];
+    const target = panelRef.current?.querySelector<HTMLElement>(`#${id} input[type="radio"]:checked, #${id} input:not([type="radio"]), #${id} button`);
     (target ?? panelRef.current)?.focus();
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') close();
@@ -79,12 +81,13 @@ export function SettingsDrawer() {
     <div className="drawer-root">
       <div className="drawer-backdrop" onClick={close} aria-hidden="true" />
       <div ref={panelRef} className="drawer" role="dialog" aria-modal="true" aria-labelledby="settings-title" tabIndex={-1}>
-        <header className="drawer-header">
+        {/* Plain divs: <header>/<footer> here would be exposed as page banner/contentinfo landmarks. */}
+        <div className="drawer-header">
           <h2 id="settings-title">Settings</h2>
           <button type="button" className="icon-button" onClick={close} aria-label="Close settings">
             <X size={20} aria-hidden="true" />
           </button>
-        </header>
+        </div>
 
         <div className="drawer-body">
           <section id={SECTION_IDS.appearance} className="settings-section" aria-labelledby="settings-appearance-title">
@@ -152,14 +155,14 @@ export function SettingsDrawer() {
           </section>
         </div>
 
-        <footer className="drawer-footer">
+        <div className="drawer-footer">
           <button type="button" className="button button-ghost" onClick={reset}>
             <RotateCcw size={16} aria-hidden="true" /> Reset to defaults
           </button>
           <button type="button" className="button button-primary" onClick={close}>
             Done
           </button>
-        </footer>
+        </div>
       </div>
     </div>
   );

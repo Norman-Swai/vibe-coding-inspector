@@ -68,6 +68,22 @@ describe('settings drawer', () => {
     expect(screen.queryByRole('group', { name: 'Theme' })).not.toBeInTheDocument();
   });
 
+  it('opens with focus on the checked theme option, so Space changes nothing', async () => {
+    window.localStorage.setItem(SETTINGS_KEY, JSON.stringify({ theme: 'dark' }));
+    const { user, dialog } = await openSettings();
+    expect(within(dialog).getByRole('radio', { name: 'Dark' })).toHaveFocus();
+    await user.keyboard(' ');
+    expect(JSON.parse(window.localStorage.getItem(SETTINGS_KEY)!)).toMatchObject({ theme: 'dark' });
+  });
+
+  it('exposes no page landmarks of its own', async () => {
+    const { dialog } = await openSettings();
+    expect(within(dialog).queryByRole('banner')).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole('contentinfo')).not.toBeInTheDocument();
+    expect(dialog.querySelector('header, footer')).toBeNull();
+    expect(within(dialog).getByRole('heading', { level: 2, name: 'Settings' })).toBeInTheDocument();
+  });
+
   it('returns focus to the settings button when closed', async () => {
     const { user } = await openSettings();
     await user.click(screen.getByRole('button', { name: 'Done' }));

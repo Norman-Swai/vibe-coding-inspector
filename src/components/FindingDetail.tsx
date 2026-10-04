@@ -16,6 +16,16 @@ function cweUrl(cwe?: string | null) {
   return match ? `https://cwe.mitre.org/data/definitions/${match[1]}.html` : null;
 }
 
+/**
+ * The Analytics search that lists the activity this finding came from. Header and cookie findings all come from the
+ * security module's one "Response headers of <url>" check; other findings are traced by the page or file they are about.
+ */
+export function traceQueryFor(finding: Finding): string | null {
+  const { url, file } = finding.location;
+  if (finding.category === 'security' && url && !file) return `Response headers of ${url}`;
+  return url ?? file ?? null;
+}
+
 export function FindingDetail({
   finding,
   baseUrl,
@@ -33,10 +43,11 @@ export function FindingDetail({
   const [error, setError] = useState<string | null>(null);
   const reviewer = settings.reviewer.trim() || undefined;
   const { evidence, review } = finding;
-  const fixDecision = finding.fix_review?.decision ?? 'pending';
+  const fixReview = finding.fix_review ?? { decision: 'pending' as const };
+  const fixDecision = fixReview.decision;
   const cwe = cweUrl(finding.cwe_id);
   const excerpt = redactSecrets(evidence.snippet || '(no excerpt captured)');
-  const traceQuery = finding.location.url ?? finding.location.file ?? null;
+  const traceQuery = traceQueryFor(finding);
   const [copied, setCopied] = useState(false);
 
   async function copyExcerpt() {
@@ -62,10 +73,16 @@ export function FindingDetail({
     }
   }
 
-  const decide = (decision: ReviewDecision) =>
-    run(decision, () => apiClient.updateReview(finding.id, { decision, reason: reason.trim() || undefined, reviewer, timestamp: new Date().toISOString() }));
-  const decideFix = (decision: FixReviewDecision) =>
-    run(`fix-${decision}`, () => apiClient.updateFixReview(finding.id, { decision, reviewer, timestamp: new Date().toISOString() }));
+  // The buttons use aria-disabled (a disabled button drops keyboard focus to <body>), so the handlers enforce the rules.
+  const needsReason = (decision: ReviewDecision) => decision === 'rejected' || decision === 'escalated';
+  const decide = (decision: ReviewDecision) => {
+    if (pending || (needsReason(decision) && !reason.trim())) return;
+    void run(decision, () => apiClient.updateReview(finding.id, { decision, reason: reason.trim() || undefined, reviewer, timestamp: new Date().toISOString() }));
+  };
+  const decideFix = (decision: FixReviewDecision) => {
+    if (pending || (decision === 'approved' && review.decision !== 'confirmed')) return;
+    void run(`fix-${decision}`, () => apiClient.updateFixReview(finding.id, { decision, reviewer, timestamp: new Date().toISOString() }));
+  };
 
   return (
     <article className="finding-detail" aria-labelledby={`finding-${finding.id}`}>
@@ -89,14 +106,17 @@ export function FindingDetail({
             </a>
           )}
         </div>
-        <h3 id={`finding-${finding.id}`}>{finding.title}</h3>
+        {/* Focusable so that opening a finding can move the keyboard here (the list may be hidden behind this detail). */}
+        <h3 id={`finding-${finding.id}`} tabIndex={-1}>
+          {finding.title}
+        </h3>
       </header>
 
       <section className="detail-section" aria-labelledby={`artifacts-${finding.id}`}>
         <div className="section-title-row">
           <h4 id={`artifacts-${finding.id}`}>Artifacts</h4>
           {traceQuery && (
-            <a className="link-button small" href={hrefFor('analytics', { q: traceQuery })}>
+            <a className="link-button small" href={hrefFor('analytics', { q: traceQuery, source: finding.category })}>
               <ScrollText size={14} aria-hidden="true" /> Trace in Analytics
             </a>
           )}
@@ -168,13 +188,13 @@ export function FindingDetail({
           {(props) => <textarea {...props} rows={2} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Why is this a false positive, or who should look at it?" />}
         </Field>
         <div className="button-row">
-          <button type="button" className="button" data-tone="success" disabled={!!pending} onClick={() => decide('confirmed')}>
+          <button type="button" className="button" data-tone="success" aria-disabled={!!pending} onClick={() => decide('confirmed')}>
             <Check size={16} aria-hidden="true" /> Confirm
           </button>
-          <button type="button" className="button" data-tone="danger" disabled={!!pending || !reason.trim()} onClick={() => decide('rejected')}>
+          <button type="button" className="button" data-tone="danger" aria-disabled={!!pending || !reason.trim()} onClick={() => decide('rejected')}>
             <X size={16} aria-hidden="true" /> Reject
           </button>
-          <button type="button" className="button" data-tone="warning" disabled={!!pending || !reason.trim()} onClick={() => decide('escalated')}>
+          <button type="button" className="button" data-tone="warning" aria-disabled={!!pending || !reason.trim()} onClick={() => decide('escalated')}>
             <Flag size={16} aria-hidden="true" /> Escalate
           </button>
         </div>
@@ -193,12 +213,17 @@ export function FindingDetail({
           {finding.fix_suggestion.diff && <pre className="evidence">{finding.fix_suggestion.diff}</pre>}
           <p className="review-status">
             <span className="muted small">Fix decision:</span> <Tag tone={fixDecision === 'approved' ? 'success' : fixDecision === 'declined' ? 'danger' : 'neutral'}>{FIX_LABEL[fixDecision]}</Tag>
+            {fixDecision !== 'pending' && (
+              <span className="muted small">
+                {fixReview.reviewer ? `by ${fixReview.reviewer}` : ''} {formatTime(fixReview.timestamp)}
+              </span>
+            )}
           </p>
           <div className="button-row">
-            <button type="button" className="button" disabled={!!pending || review.decision !== 'confirmed'} onClick={() => decideFix('approved')}>
+            <button type="button" className="button" aria-disabled={!!pending || review.decision !== 'confirmed'} onClick={() => decideFix('approved')}>
               Approve fix
             </button>
-            <button type="button" className="button button-ghost" disabled={!!pending} onClick={() => decideFix('declined')}>
+            <button type="button" className="button button-ghost" aria-disabled={!!pending} onClick={() => decideFix('declined')}>
               Decline fix
             </button>
           </div>

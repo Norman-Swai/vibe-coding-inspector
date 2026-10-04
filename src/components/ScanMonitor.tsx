@@ -11,6 +11,14 @@ export function finishedModules(scan: ScanStatusResponse) {
   return MODULES.filter((module) => TERMINAL.includes(scan.modules[module].state)).length;
 }
 
+/** How a finished scan ended. Every status badge uses these words, and none is green unless something was actually checked. */
+export function scanOutcome(scan: ScanStatusResponse): { tone: 'success' | 'warning' | 'danger'; label: string } {
+  const states = MODULES.map((module) => scan.modules[module].state);
+  if (states.includes('failed')) return { tone: 'danger', label: 'Finished with errors' };
+  if (!states.includes('done')) return { tone: 'warning', label: 'Finished, nothing checked' };
+  return { tone: 'success', label: 'Complete' };
+}
+
 /** Elapsed time that ticks while the scan runs. Uses the local start time when known (no clock skew). */
 function useElapsed(scan: ScanStatusResponse | null, localStart: number | null) {
   const running = scan?.status === 'running';
@@ -57,6 +65,7 @@ export function ScanMonitor({
   const running = scan.status === 'running';
   const finished = finishedModules(scan);
   const failed = MODULES.filter((module) => scan.modules[module].state === 'failed');
+  const outcome = scanOutcome(scan);
 
   return (
     <Panel
@@ -69,8 +78,8 @@ export function ScanMonitor({
             <span className="spinner" aria-hidden="true" /> Scanning · {formatDuration(elapsed)}
           </Tag>
         ) : (
-          <Tag tone={failed.length ? 'danger' : 'success'}>
-            {failed.length ? 'Finished with errors' : 'Complete'} · {formatDuration(elapsed)}
+          <Tag tone={outcome.tone}>
+            {outcome.label} · {formatDuration(elapsed)}
           </Tag>
         )
       }

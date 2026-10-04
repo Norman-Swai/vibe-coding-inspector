@@ -1,5 +1,5 @@
 import { Globe, Laptop, Play } from 'lucide-react';
-import { type FormEvent, useState } from 'react';
+import { type FormEvent, useId, useRef, useState } from 'react';
 import type { InspectionMode, ScanRequest } from '../contracts/finding';
 import { useSettings } from '../lib/settings';
 import { ErrorNotice, Field, Panel, SegmentedControl } from './ui';
@@ -7,9 +7,13 @@ import { ErrorNotice, Field, Panel, SegmentedControl } from './ui';
 const LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]'];
 
 export function validateTarget(url: string, mode: InspectionMode): string | null {
+  const value = url.trim();
+  if (!value) return 'Enter a full URL, for example http://localhost:3000.';
+  // new URL('localhost:3000') parses with the protocol "localhost:", which would give the wrong-protocol message.
+  if (!value.includes('://')) return 'Add http:// at the start, for example http://localhost:3000.';
   let parsed: URL;
   try {
-    parsed = new URL(url.trim());
+    parsed = new URL(value);
   } catch {
     return 'Enter a full URL, for example http://localhost:3000.';
   }
@@ -24,7 +28,7 @@ export function validateRepoPath(path: string): string | null {
   return value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value) ? null : 'Use an absolute path, for example /home/me/my-app.';
 }
 
-/** The form's contents. Owned by the app shell so they survive switching views while a scan runs. */
+/** The form's contents. Owned by the app shell so they survive switching views while a scan runs, and a reload. */
 export interface LaunchDraft {
   mode: InspectionMode;
   targetUrl: string;
@@ -33,6 +37,11 @@ export interface LaunchDraft {
 }
 
 export const EMPTY_DRAFT: LaunchDraft = { mode: 'localhost', targetUrl: 'http://localhost:3000', repoPath: '', authorized: false };
+
+const AUTH_ERROR = 'Confirm that you are authorised before scanning.';
+// A rejected start names the field it is about (backend/app.py); it is shown there, like the local validation.
+const SERVER_TARGET_ERROR = /^(Enter a full http|Localhost mode only|target_url)/;
+const SERVER_REPO_ERROR = /^(Repository|repo_path)/;
 
 export function LaunchPanel({
   draft,
@@ -58,9 +67,17 @@ export function LaunchPanel({
   const setRepoPath = (value: string) => onDraftChange({ repoPath: value });
   const setAuthorized = (value: boolean) => onDraftChange({ authorized: value });
   const [submitted, setSubmitted] = useState(false);
+  const targetRef = useRef<HTMLInputElement>(null);
+  const repoRef = useRef<HTMLInputElement>(null);
+  const authRef = useRef<HTMLInputElement>(null);
+  const authErrorId = useId();
 
+  const serverTargetError = error && SERVER_TARGET_ERROR.test(error) ? error : null;
+  const serverRepoError = error && mode === 'localhost' && SERVER_REPO_ERROR.test(error) ? error : null;
+  const formError = error && !serverTargetError && !serverRepoError ? error : null;
   const targetError = validateTarget(targetUrl, mode);
   const repoError = mode === 'localhost' ? validateRepoPath(repoPath) : null;
+  const authError = submitted && !authorized ? AUTH_ERROR : null;
   const canSubmit = !targetError && !repoError && authorized && !busy && !running && !blockedReason;
 
   function submit(event: FormEvent) {
@@ -68,7 +85,11 @@ export function LaunchPanel({
     if (busy || running) return;
     setSubmitted(true);
     if (blockedReason) return;
-    if (!canSubmit) return;
+    if (!canSubmit) {
+      // Take the keyboard to the first thing that needs fixing rather than leaving it on the Start button.
+      (targetError ? targetRef : repoError ? repoRef : authRef).current?.focus();
+      return;
+    }
     onStart({
       target_url: targetUrl.trim(),
       repo_path: mode === 'localhost' && repoPath.trim() ? repoPath.trim() : undefined,
@@ -97,10 +118,11 @@ export function LaunchPanel({
           ]}
         />
 
-        <Field label="Target URL" error={submitted || targetUrl ? targetError : null}>
+        <Field label="Target URL" error={(submitted || targetUrl ? targetError : null) ?? serverTargetError}>
           {(props) => (
             <input
               {...props}
+              ref={targetRef}
               type="url"
               inputMode="url"
               autoComplete="url"
@@ -113,10 +135,11 @@ export function LaunchPanel({
         </Field>
 
         {mode === 'localhost' && (
-          <Field label="Repository path (optional)" hint="Absolute path to the app's source. Enables static analysis, secret scanning and npm audit." error={repoError}>
+          <Field label="Repository path (optional)" hint="Absolute path to the app's source. Enables static analysis, secret scanning and npm audit." error={repoError ?? serverRepoError}>
             {(props) => (
               <input
                 {...props}
+                ref={repoRef}
                 autoComplete="off"
                 spellCheck={false}
                 value={repoPath}
@@ -128,10 +151,21 @@ export function LaunchPanel({
         )}
 
         <label className="checkbox">
-          <input type="checkbox" checked={authorized} onChange={(event) => setAuthorized(event.target.checked)} />
+          <input
+            ref={authRef}
+            type="checkbox"
+            checked={authorized}
+            aria-invalid={authError ? true : undefined}
+            aria-describedby={authError ? authErrorId : undefined}
+            onChange={(event) => setAuthorized(event.target.checked)}
+          />
           <span>I own this app or I am authorised to inspect it.</span>
         </label>
-        {submitted && !authorized && <p className="field-error">Confirm that you are authorised before scanning.</p>}
+        {authError && (
+          <p id={authErrorId} className="field-error">
+            {authError}
+          </p>
+        )}
 
         <div className="form-footer">
           <p className="muted small">
@@ -147,7 +181,7 @@ export function LaunchPanel({
           </button>
         </div>
         {blockedReason && <p className="field-error">{blockedReason}</p>}
-        {error && <ErrorNotice>{error}</ErrorNotice>}
+        {formError && <ErrorNotice>{formError}</ErrorNotice>}
       </form>
     </Panel>
   );

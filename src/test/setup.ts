@@ -9,6 +9,7 @@ Element.prototype.scrollIntoView ??= function scrollIntoView() {};
 beforeEach(() => {
   installMatchMedia();
   window.localStorage.clear();
+  window.sessionStorage.clear();
   window.history.replaceState(null, '', '/');
 });
 

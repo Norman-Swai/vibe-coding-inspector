@@ -5,7 +5,7 @@ import { EmptyState, ErrorNotice, Panel } from '../components/ui';
 import { ViewHeader } from '../components/ViewHeader';
 import type { Finding, ScanStatusResponse } from '../contracts/finding';
 import { hrefFor } from '../hooks/useHashRoute';
-import { MODULE_META, MODULES } from '../lib/meta';
+import { listOf, MODULE_META, MODULES } from '../lib/meta';
 
 /** Headline numbers that the severity filters below do not show: how the findings were established and reviewed. */
 function FindingsSummary({ scan, findings }: { scan: ScanStatusResponse; findings: Finding[] }) {
@@ -48,7 +48,7 @@ function FindingsSummary({ scan, findings }: { scan: ScanStatusResponse; finding
       </ul>
       {notRun.length > 0 && (
         <p className="notice" data-tone="warning">
-          {notRun.map((module) => MODULE_META[module].label).join(' and ')} {notRun.length === 1 ? 'was' : 'were'} skipped or failed, so{' '}
+          {listOf(notRun.map((module) => MODULE_META[module].label))} {notRun.length === 1 ? 'was' : 'were'} skipped or failed, so{' '}
           {notRun.length === 1 ? 'its' : 'their'} checks are not reflected here. <a href={hrefFor('analytics')}>See why in Analytics</a>.
         </p>
       )}

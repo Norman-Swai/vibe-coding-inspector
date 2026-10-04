@@ -1,11 +1,25 @@
 import { Download, ScrollText, Search } from 'lucide-react';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import type { ActivityEvent, ModuleName } from '../contracts/finding';
 import { ACTIVITY_KIND_META, formatOffset, MODULE_META, MODULES, redactSecrets, SHARED_SOURCE_LABEL } from '../lib/meta';
 import { EmptyState, Panel, SegmentedControl } from './ui';
 
-type KindFilter = 'all' | 'request' | 'check' | 'command' | 'problem';
-type SourceFilter = 'all' | 'shared' | ModuleName;
+export type KindFilter = 'all' | 'request' | 'check' | 'command' | 'problem';
+export type SourceFilter = 'all' | 'shared' | ModuleName;
+
+/** Filters. Owned by the app shell so they survive leaving Analytics and coming back. */
+export interface ActivityUiState {
+  kind: KindFilter;
+  source: SourceFilter;
+  query: string;
+}
+
+export const EMPTY_ACTIVITY_UI: ActivityUiState = { kind: 'all', source: 'all', query: '' };
+
+/** A source filter from the route (#/analytics?source=…), or null when the value is not one. */
+export function parseSource(value: string | null): SourceFilter | null {
+  return value === 'all' || value === 'shared' || MODULES.includes(value as ModuleName) ? (value as SourceFilter) : null;
+}
 
 /** Commands are logged as "$ <command> → …"; a failed run is an error event but is still a command. */
 export function isCommand(event: ActivityEvent) {
@@ -19,6 +33,13 @@ const KIND_FILTERS: Record<KindFilter, (event: ActivityEvent) => boolean> = {
   command: isCommand,
   problem: (event) => event.kind === 'warning' || event.kind === 'error',
 };
+
+/** Shared events (the HTTP client, crawler and repository index) are work done for every module, so a module's view includes them. */
+function fromSource(event: ActivityEvent, source: SourceFilter) {
+  if (source === 'all') return true;
+  if (source === 'shared') return event.module === null;
+  return event.module === source || event.module === null;
+}
 
 export function sourceLabel(module: ModuleName | null) {
   return module ? MODULE_META[module].label : SHARED_SOURCE_LABEL;
@@ -34,13 +55,22 @@ export function activityAsText(events: ActivityEvent[]) {
     .join('\n');
 }
 
+function escapeRegExp(text: string) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** A full URL matches whole: tracing "http://x/" must list the request for that page, not every request under http://x/. */
 function matches(event: ActivityEvent, query: string) {
   if (!query) return true;
-  const haystack = `${event.message} ${event.output ?? ''} ${event.request?.url ?? ''}`.toLowerCase();
-  return query
-    .toLowerCase()
-    .split(/\s+/)
-    .every((word) => haystack.includes(word));
+  const lowered = query.toLowerCase();
+  const text = `${event.message} ${event.output ?? ''}`.toLowerCase();
+  if (/^https?:\/\//.test(lowered)) {
+    if (event.request?.url.toLowerCase() === lowered) return true;
+    // The URL may be followed by punctuation (":", ")") but not by more path, query or fragment.
+    return new RegExp(`${escapeRegExp(lowered)}(?![\\w/?#&=%+~-]|\\.\\S)`).test(text);
+  }
+  const haystack = `${text} ${event.request?.url.toLowerCase() ?? ''}`;
+  return lowered.split(/\s+/).every((word) => haystack.includes(word));
 }
 
 /** Chronological log of everything the inspector did, with the output of each check and command. */
@@ -48,34 +78,32 @@ export function ActivityLog({
   events,
   dropped,
   running,
+  ui,
+  onUiChange,
   initialQuery = '',
+  initialSource = null,
   onDownload,
 }: {
   events: ActivityEvent[];
   dropped: number;
   running: boolean;
+  ui: ActivityUiState;
+  onUiChange: (patch: Partial<ActivityUiState>) => void;
   initialQuery?: string;
+  initialSource?: SourceFilter | null;
   onDownload: () => void;
 }) {
-  const [kind, setKind] = useState<KindFilter>('all');
-  const [source, setSource] = useState<SourceFilter>('all');
-  const [query, setQuery] = useState(initialQuery);
+  const { kind, source, query } = ui;
   const listRef = useRef<HTMLOListElement>(null);
   const followRef = useRef(true);
   const wasRunning = useRef(running);
 
-  useEffect(() => setQuery(initialQuery), [initialQuery]);
+  // A trace link ("Trace in Analytics") sets the filters it needs; a plain visit keeps whatever was set before.
+  useEffect(() => {
+    if (initialQuery || initialSource) onUiChange({ kind: 'all', source: initialSource ?? 'all', query: initialQuery });
+  }, [initialQuery, initialSource, onUiChange]);
 
-  const visible = useMemo(
-    () =>
-      events.filter(
-        (event) =>
-          KIND_FILTERS[kind](event) &&
-          (source === 'all' || (source === 'shared' ? event.module === null : event.module === source)) &&
-          matches(event, query.trim()),
-      ),
-    [events, kind, source, query],
-  );
+  const visible = useMemo(() => events.filter((event) => KIND_FILTERS[kind](event) && fromSource(event, source) && matches(event, query.trim())), [events, kind, source, query]);
 
   // Keep the newest event in view while the scan runs (including the final batch that arrives with completion),
   // unless the reader has scrolled up.
@@ -102,7 +130,7 @@ export function ActivityLog({
         <SegmentedControl
           label="Show"
           value={kind}
-          onChange={setKind}
+          onChange={(value) => onUiChange({ kind: value })}
           options={[
             { value: 'all', label: 'All' },
             { value: 'request', label: 'Requests' },
@@ -114,7 +142,7 @@ export function ActivityLog({
         <div className="toolbar-row">
           <label className="inline-field">
             <span className="visually-hidden">Source</span>
-            <select value={source} onChange={(event) => setSource(event.target.value as SourceFilter)}>
+            <select value={source} onChange={(event) => onUiChange({ source: event.target.value as SourceFilter })}>
               <option value="all">All sources</option>
               <option value="shared">{SHARED_SOURCE_LABEL}</option>
               {MODULES.map((module) => (
@@ -127,7 +155,7 @@ export function ActivityLog({
           <label className="inline-field search-field">
             <Search size={16} aria-hidden="true" />
             <span className="visually-hidden">Search activity</span>
-            <input type="search" value={query} placeholder="Search messages, URLs, output" onChange={(event) => setQuery(event.target.value)} />
+            <input type="search" value={query} placeholder="Search activity" onChange={(event) => onUiChange({ query: event.target.value })} />
           </label>
         </div>
       </div>

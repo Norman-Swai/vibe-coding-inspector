@@ -5,17 +5,21 @@ import { describe, expect, it, vi } from 'vitest';
 import App from '../App';
 import { EMPTY_FINDINGS_UI, FindingsPanel, type FindingsUiState } from '../components/FindingsPanel';
 import { validateRepoPath, validateTarget } from '../components/LaunchPanel';
-import type { Finding } from '../contracts/finding';
+import type { Finding, ScanStatusResponse } from '../contracts/finding';
 import { POLL_INTERVAL_MS, useScan } from '../hooks/useScan';
 import { SettingsProvider } from '../lib/settings';
-import { HEALTHY, installMatchMedia, jsonResponse, makeFinding, makeScan } from './utils';
+import { HEALTHY, installMatchMedia, jsonResponse, makeFinding, makeScan, mockApi } from './utils';
 
 describe('launch form', () => {
   it('validates the target for the selected mode', () => {
     expect(validateTarget('http://localhost:3000', 'localhost')).toBeNull();
     expect(validateTarget('https://example.com', 'localhost')).toMatch(/Localhost mode only accepts/);
     expect(validateTarget('https://example.com', 'public-readonly')).toBeNull();
-    expect(validateTarget('example.com', 'public-readonly')).toMatch(/full URL/);
+    // A value without a scheme gets told what to add, not that its "protocol" is unsupported (new URL parses "localhost:" as one).
+    expect(validateTarget('example.com', 'public-readonly')).toMatch(/Add http:\/\/ at the start/);
+    expect(validateTarget('localhost:8765', 'localhost')).toMatch(/Add http:\/\/ at the start/);
+    expect(validateTarget('ftp://localhost', 'localhost')).toMatch(/Only http:\/\/ and https:\/\//);
+    expect(validateTarget('', 'localhost')).toMatch(/full URL/);
     expect(validateRepoPath('')).toBeNull();
     expect(validateRepoPath('relative/path')).toMatch(/absolute/);
   });
@@ -55,6 +59,24 @@ describe('launch form', () => {
     expect(window.localStorage.getItem('vci-last-scan')).toBe('scan-1');
   });
 
+  it('links the authorisation error to the checkbox and moves focus to it', async () => {
+    vi.stubGlobal('fetch', vi.fn(mockApi({})));
+    window.location.hash = '#/launch';
+    const user = userEvent.setup();
+    render(<App />);
+    const checkbox = screen.getByRole('checkbox', { name: /authorised/ });
+    expect(checkbox).not.toHaveAttribute('aria-invalid');
+
+    await user.click(screen.getByRole('button', { name: /Start scan/ }));
+
+    expect(checkbox).toHaveAttribute('aria-invalid', 'true');
+    expect(checkbox).toHaveAccessibleDescription('Confirm that you are authorised before scanning.');
+    expect(checkbox).toHaveFocus();
+    await user.click(checkbox);
+    expect(checkbox).not.toHaveAttribute('aria-invalid');
+    expect(screen.queryByText('Confirm that you are authorised before scanning.')).not.toBeInTheDocument();
+  });
+
   it('hides the repository field in public mode', async () => {
     window.location.hash = '#/launch';
     const user = userEvent.setup();
@@ -64,15 +86,15 @@ describe('launch form', () => {
   });
 });
 
-function FindingsHarness({ findings, onUpdated }: { findings: Finding[]; onUpdated: (finding: Finding) => void }) {
+function FindingsHarness({ findings, scan = makeScan(), onUpdated }: { findings: Finding[]; scan?: ScanStatusResponse; onUpdated: (finding: Finding) => void }) {
   const [ui, setUi] = useState<FindingsUiState>(EMPTY_FINDINGS_UI);
-  return <FindingsPanel scan={makeScan()} findings={findings} ui={ui} onUiChange={(patch) => setUi((current) => ({ ...current, ...patch }))} onFindingUpdated={onUpdated} />;
+  return <FindingsPanel scan={scan} findings={findings} ui={ui} onUiChange={(patch) => setUi((current) => ({ ...current, ...patch }))} onFindingUpdated={onUpdated} />;
 }
 
-function renderFindings(findings: Finding[], onUpdated = vi.fn()) {
+function renderFindings(findings: Finding[], onUpdated = vi.fn(), scan?: ScanStatusResponse) {
   return render(
     <SettingsProvider>
-      <FindingsHarness findings={findings} onUpdated={onUpdated} />
+      <FindingsHarness findings={findings} scan={scan} onUpdated={onUpdated} />
     </SettingsProvider>,
   );
 }
@@ -120,9 +142,13 @@ describe('findings', () => {
     const user = userEvent.setup();
     renderFindings([makeFinding()], onUpdated);
 
+    // aria-disabled rather than disabled, so the button keeps keyboard focus; the handler enforces the rule.
     const reject = screen.getByRole('button', { name: /Reject/ });
-    expect(reject).toBeDisabled();
+    expect(reject).toHaveAttribute('aria-disabled', 'true');
+    await user.click(reject);
+    expect(fetchMock).not.toHaveBeenCalled();
     await user.type(screen.getByLabelText('Reason'), 'Decorative field');
+    expect(reject).toHaveAttribute('aria-disabled', 'false');
     await user.click(reject);
 
     expect(JSON.parse(String((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body))).toMatchObject({
@@ -131,22 +157,123 @@ describe('findings', () => {
       reviewer: 'Norman',
     });
     expect(onUpdated).toHaveBeenCalledWith(updated);
-    expect(screen.getByRole('button', { name: 'Approve fix' })).toBeDisabled();
+    const approve = screen.getByRole('button', { name: 'Approve fix' });
+    expect(approve).toHaveAttribute('aria-disabled', 'true');
+    await user.click(approve);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps keyboard focus on a review button while its request is pending and sends it once', async () => {
+    let finish: (response: Response) => void = () => undefined;
+    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => (finish = resolve)));
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    renderFindings([makeFinding()]);
+
+    const confirm = screen.getByRole('button', { name: /Confirm/ });
+    confirm.focus();
+    await user.keyboard('{Enter}');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(confirm).toHaveAttribute('aria-disabled', 'true');
+    expect(confirm).not.toBeDisabled();
+    expect(confirm).toHaveFocus();
+    await user.keyboard('{Enter}');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    finish(jsonResponse(makeFinding({ review: { decision: 'confirmed', reviewer: 'Norman', timestamp: '2026-10-04T14:21:00+00:00' } })));
+    await waitFor(() => expect(confirm).toHaveAttribute('aria-disabled', 'false'));
+    expect(confirm).toHaveFocus();
+  });
+
+  it('shows who made the fix decision and when', () => {
+    renderFindings([
+      makeFinding({
+        review: { decision: 'confirmed', reviewer: 'QA Tester', timestamp: '2026-10-04T14:21:00+00:00' },
+        fix_review: { decision: 'approved', reviewer: 'QA Tester', timestamp: '2026-10-04T14:22:00+00:00' },
+      }),
+    ]);
+    const detail = screen.getByRole('article');
+    const line = within(detail).getByText('Fix decision:').closest('p');
+    expect(line).toHaveTextContent(/Approved\s*by QA Tester/);
+    expect(line).toHaveTextContent(new Date('2026-10-04T14:22:00+00:00').toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }));
+  });
+
+  it('is one tab stop on wide screens: arrow keys move the selection and Tab reaches the detail', async () => {
+    const user = userEvent.setup();
+    renderFindings([makeFinding({ id: 'a', title: 'First', severity: 'high' }), makeFinding({ id: 'b', title: 'Second' }), makeFinding({ id: 'c', title: 'Third', severity: 'low' })]);
+    const list = screen.getByRole('list', { name: 'Findings' });
+    const items = within(list).getAllByRole('button');
+    expect(items.map((item) => item.tabIndex)).toEqual([0, -1, -1]);
+
+    items[0].focus();
+    await user.keyboard('{ArrowDown}');
+    expect(items[1]).toHaveFocus();
+    expect(screen.getByRole('heading', { level: 3, name: 'Second' })).toBeInTheDocument();
+    expect(items.map((item) => item.tabIndex)).toEqual([-1, 0, -1]);
+    await user.keyboard('{End}');
+    expect(items[2]).toHaveFocus();
+    expect(screen.getByRole('heading', { level: 3, name: 'Third' })).toBeInTheDocument();
+
+    await user.tab();
+    expect(screen.getByRole('link', { name: /Trace in Analytics/ })).toHaveFocus();
   });
 
   it('switches between list and detail on narrow screens', async () => {
     installMatchMedia((query) => query === '(max-width: 899px)');
     const user = userEvent.setup();
     renderFindings([makeFinding({ id: 'a', title: 'First' }), makeFinding({ id: 'b', title: 'Second' })]);
+    const entries = window.history.length;
 
     expect(screen.queryByRole('article')).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /Second/ }));
-    expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument();
+    const heading = await screen.findByRole('heading', { name: 'Second' });
+    // Opening the detail is a navigation of its own, so the system Back button closes it; focus moves into it.
+    expect(window.location.hash).toBe('#/findings?finding=b');
+    expect(window.history.length).toBe(entries + 1);
+    await waitFor(() => expect(heading).toHaveFocus());
     // styles.css hides the list pane while data-view="detail" (CSS is not loaded in jsdom).
     expect(screen.getByRole('list', { name: 'Findings' }).closest('.findings-layout')).toHaveAttribute('data-view', 'detail');
 
     await user.click(screen.getByRole('button', { name: /All findings/ }));
-    expect(screen.queryByRole('article')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('article')).not.toBeInTheDocument());
+    // "All findings" went back to the list entry rather than adding another one.
+    expect(window.location.hash).not.toContain('finding=');
+    expect(window.history.length).toBe(entries + 1);
+    await waitFor(() => expect(screen.getByRole('button', { name: /Second/ })).toHaveFocus());
+  });
+
+  it('closes a narrow-screen detail on hardware Back', async () => {
+    installMatchMedia((query) => query === '(max-width: 899px)');
+    const user = userEvent.setup();
+    renderFindings([makeFinding({ id: 'a', title: 'First' })]);
+    await user.click(screen.getByRole('button', { name: /First/ }));
+    await screen.findByRole('article');
+
+    act(() => window.history.back());
+    await waitFor(() => expect(screen.queryByRole('article')).not.toBeInTheDocument());
+    expect(screen.getByRole('list', { name: 'Findings' })).toBeInTheDocument();
+  });
+
+  it('never reports "No issues found" for modules that did not run', () => {
+    const report = { scanned: 0, scanned_label: '', notes: [] };
+    const failed = { ...report, state: 'failed' as const, error: 'boom' };
+    const skipped = { ...report, state: 'skipped' as const };
+    const done = { ...report, state: 'done' as const, scanned: 3, scanned_label: '3 source files' };
+
+    const nothing = renderFindings([], vi.fn(), makeScan({ modules: { runtime: failed, static: skipped, security: failed, compliance: failed } }));
+    expect(screen.getByText('Nothing could be checked')).toBeInTheDocument();
+    expect(screen.queryByText(/No issues found/)).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'See why in Analytics' })).toHaveAttribute('href', '#/analytics');
+    nothing.unmount();
+
+    const partial = renderFindings([], vi.fn(), makeScan({ modules: { runtime: failed, static: done, security: failed, compliance: skipped } }));
+    expect(screen.getByText('No issues found by Static code')).toBeInTheDocument();
+    expect(screen.getByText(/3 modules did not run/)).toBeInTheDocument();
+    partial.unmount();
+
+    renderFindings([], vi.fn(), makeScan());
+    expect(screen.getByText('No issues found')).toBeInTheDocument();
+    expect(screen.getByText(/Every module ran/)).toBeInTheDocument();
   });
 });
 

@@ -1936,3 +1936,9 @@ textarea:focus-visible {
     color: #000;
   }
 }
+
+/* ---------- Review buttons: aria-disabled keeps keyboard focus while a request is pending ---------- */
+.button[aria-disabled='true']:not(.button-primary) {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

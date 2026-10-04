@@ -1,17 +1,18 @@
 import { BarChart3, Home, ListChecks, Rocket, ScanSearch, Settings as SettingsIcon } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiClient } from './api/client';
+import { type ActivityUiState, EMPTY_ACTIVITY_UI } from './components/ActivityLog';
 import { BackendBanner } from './components/BackendBanner';
 import { EMPTY_FINDINGS_UI, type FindingsUiState } from './components/FindingsPanel';
 import { EMPTY_DRAFT, type LaunchDraft } from './components/LaunchPanel';
 import { finishedModules } from './components/ScanMonitor';
 import { SettingsDrawer } from './components/SettingsDrawer';
 import { ViewErrorBoundary } from './components/ViewErrorBoundary';
-import type { ScanRequest } from './contracts/finding';
+import type { ModuleName, ScanRequest, Severity } from './contracts/finding';
 import { hrefFor, useHashRoute, type View } from './hooks/useHashRoute';
 import { useBackendHealth } from './hooks/useBackendHealth';
 import { useScan } from './hooks/useScan';
-import { MODULES, redactSecrets } from './lib/meta';
+import { MODULES, redactSecrets, SEVERITIES } from './lib/meta';
 import { SettingsProvider, useSettings } from './lib/settings';
 import { AnalyticsView } from './views/AnalyticsView';
 import { FindingsView } from './views/FindingsView';
@@ -26,6 +27,9 @@ const NAV: { view: View; label: string; icon: typeof Home }[] = [
 ];
 
 export const LAST_SCAN_KEY = 'vci-last-scan';
+/** Per-tab state (sessionStorage): the launch form and the findings filters and selection survive a reload. */
+export const LAUNCH_DRAFT_KEY = 'vci-launch-draft';
+export const FINDINGS_UI_KEY = 'vci-findings-ui';
 
 function readLastScan(): string | null {
   try {
@@ -44,21 +48,71 @@ function writeLastScan(scanId: string | null) {
   }
 }
 
+function readSession<T>(key: string): Partial<T> | null {
+  try {
+    const stored = window.sessionStorage.getItem(key);
+    const value: unknown = stored ? JSON.parse(stored) : null;
+    return value && typeof value === 'object' ? (value as Partial<T>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeSession(key: string, value: unknown) {
+  try {
+    window.sessionStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Without storage the form and filters are simply forgotten on reload.
+  }
+}
+
+function readDraft(): LaunchDraft {
+  const stored = readSession<LaunchDraft>(LAUNCH_DRAFT_KEY) ?? {};
+  return {
+    mode: stored.mode === 'public-readonly' ? 'public-readonly' : EMPTY_DRAFT.mode,
+    targetUrl: typeof stored.targetUrl === 'string' ? stored.targetUrl : EMPTY_DRAFT.targetUrl,
+    repoPath: typeof stored.repoPath === 'string' ? stored.repoPath : EMPTY_DRAFT.repoPath,
+    authorized: stored.authorized === true,
+  };
+}
+
+/** Filters and selection belong to one scan: a stored state for another scan is ignored. */
+function readFindingsUi(scanId: string | null): FindingsUiState {
+  const stored = readSession<FindingsUiState & { scanId: string }>(FINDINGS_UI_KEY);
+  if (!scanId || stored?.scanId !== scanId) return EMPTY_FINDINGS_UI;
+  return {
+    severities: Array.isArray(stored.severities) ? stored.severities.filter((severity): severity is Severity => SEVERITIES.includes(severity)) : [],
+    module: MODULES.includes(stored.module as ModuleName) ? (stored.module as ModuleName) : 'all',
+    query: typeof stored.query === 'string' ? stored.query : '',
+    selectedId: typeof stored.selectedId === 'string' ? stored.selectedId : null,
+  };
+}
+
 function Workspace() {
   const { isOpen, open } = useSettings();
   const { view, params } = useHashRoute();
   // The current scan survives reloads and view changes; it is forgotten if the backend no longer has it.
   const [scanId, setScanId] = useState<string | null>(readLastScan);
   const [localStart, setLocalStart] = useState<number | null>(null);
-  const [draft, setDraft] = useState<LaunchDraft>(EMPTY_DRAFT);
-  const updateDraft = useCallback((patch: Partial<LaunchDraft>) => setDraft((current) => ({ ...current, ...patch })), []);
-  const [findingsUi, setFindingsUi] = useState<FindingsUiState>(EMPTY_FINDINGS_UI);
-  const updateFindingsUi = useCallback((patch: Partial<FindingsUiState>) => setFindingsUi((current) => ({ ...current, ...patch })), []);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  const [draft, setDraft] = useState<LaunchDraft>(readDraft);
+  const updateDraft = useCallback((patch: Partial<LaunchDraft>) => {
+    setDraft((current) => ({ ...current, ...patch }));
+    // A rejected start was about the previous values; its message must not outlive the correction.
+    setStartError(null);
+  }, []);
+  const [findingsUi, setFindingsUi] = useState<FindingsUiState>(() => readFindingsUi(scanId));
+  const updateFindingsUi = useCallback((patch: Partial<FindingsUiState>) => setFindingsUi((current) => ({ ...current, ...patch })), []);
+  const [activityUi, setActivityUi] = useState<ActivityUiState>(EMPTY_ACTIVITY_UI);
+  const updateActivityUi = useCallback((patch: Partial<ActivityUiState>) => setActivityUi((current) => ({ ...current, ...patch })), []);
   // Explains why a remembered scan disappeared; lives here because useScan resets its own state when the id changes.
   const [notice, setNotice] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState('');
+  // The scan started from this page: its completion is announced even if its first poll already shows it complete,
+  // and the live monitor is scrolled into view once it has rendered.
+  const startedScan = useRef<string | null>(null);
+  const scrollToMonitor = useRef(false);
   const forgetScan = useCallback((message: string) => {
     writeLastScan(null);
     setScanId(null);
@@ -73,6 +127,11 @@ function Workspace() {
   // From the same snapshot as the status, so live text and badges never show a stale count.
   const findingsCount = scan?.summary.total_findings ?? 0;
 
+  useEffect(() => writeSession(LAUNCH_DRAFT_KEY, draft), [draft]);
+  useEffect(() => {
+    if (scanId) writeSession(FINDINGS_UI_KEY, { scanId, ...findingsUi });
+  }, [scanId, findingsUi]);
+
   async function startScan(request: ScanRequest) {
     setStarting(true);
     setStartError(null);
@@ -82,19 +141,29 @@ function Workspace() {
       setLocalStart(Date.now());
       setNotice(null);
       setFindingsUi(EMPTY_FINDINGS_UI);
+      setActivityUi(EMPTY_ACTIVITY_UI);
       setScanId(id);
+      startedScan.current = id;
+      scrollToMonitor.current = true;
       setAnnouncement(`Scan started for ${request.target_url}.`);
-      // On stacked (phone) layouts the live monitor sits below the form: bring it into view.
-      requestAnimationFrame(() => {
-        const monitor = document.querySelector<HTMLElement>('.monitor-panel');
-        if (monitor && monitor.getBoundingClientRect().top > window.innerHeight * 0.6) monitor.scrollIntoView({ block: 'start' });
-      });
     } catch (scanError) {
       setStartError(scanError instanceof Error ? scanError.message : 'Unable to start the scan.');
     } finally {
       setStarting(false);
     }
   }
+
+  // On stacked (phone) layouts the live monitor sits below the form: bring it into view once the started scan has
+  // rendered. Before its first status arrives the panel is still the short "Nothing is running" state and the page is
+  // too short to scroll that far.
+  useEffect(() => {
+    if (!scrollToMonitor.current || !scan || scan.id !== scanId) return;
+    scrollToMonitor.current = false;
+    requestAnimationFrame(() => {
+      const monitor = document.querySelector<HTMLElement>('.monitor-panel');
+      if (monitor && monitor.getBoundingClientRect().top > window.innerHeight * 0.6) monitor.scrollIntoView({ block: 'start' });
+    });
+  }, [scan, scanId]);
 
   // Move focus to the new view's heading when the view changes (never on first load) so keyboard and
   // screen-reader users land in the right place. Comparing views keeps this correct under StrictMode's double effects.
@@ -106,17 +175,20 @@ function Workspace() {
     document.querySelector<HTMLElement>('[data-view-heading]')?.focus({ preventScroll: true });
   }, [view]);
 
-  // Announce the end of a scan on whichever view is open (the start is announced when it is requested).
+  // Announce the end of a scan on whichever view is open (the start is announced when it is requested): a scan that
+  // was running when the page loaded, or the one started here, which may already be complete when first seen.
   const lastStatus = useRef<{ id: string | null; status: string | null }>({ id: null, status: null });
   useEffect(() => {
     if (!scan) return;
     const previous = lastStatus.current;
     lastStatus.current = { id: scan.id, status: scan.status };
-    if (previous.id === scan.id && previous.status === 'running' && scan.status === 'completed') {
-      const failed = MODULES.filter((module) => scan.modules[module].state === 'failed').length;
-      const total = scan.summary.total_findings;
-      setAnnouncement(`Scan complete: ${total} finding${total === 1 ? '' : 's'}${failed ? `, ${failed} module${failed === 1 ? '' : 's'} failed` : ''}.`);
-    }
+    if (scan.status !== 'completed') return;
+    const wasRunning = previous.id === scan.id && previous.status === 'running';
+    if (!wasRunning && startedScan.current !== scan.id) return;
+    startedScan.current = null;
+    const failed = MODULES.filter((module) => scan.modules[module].state === 'failed').length;
+    const total = scan.summary.total_findings;
+    setAnnouncement(`Scan complete: ${total} finding${total === 1 ? '' : 's'}${failed ? `, ${failed} module${failed === 1 ? '' : 's'} failed` : ''}.`);
   }, [scan]);
 
   useEffect(() => {
@@ -182,17 +254,29 @@ function Workspace() {
               onStart={(request) => void startScan(request)}
             />
           )}
-          {view === 'analytics' && <AnalyticsView scan={scan} activity={activity} activityDropped={activityDropped} error={error} query={params.get('q') ?? ''} />}
+          {view === 'analytics' && (
+            <AnalyticsView
+              scan={scan}
+              activity={activity}
+              activityDropped={activityDropped}
+              error={error}
+              query={params.get('q') ?? ''}
+              source={params.get('source')}
+              ui={activityUi}
+              onUiChange={updateActivityUi}
+            />
+          )}
           {view === 'findings' && (
             <FindingsView scan={scan} findings={findings} error={error} ui={findingsUi} onUiChange={updateFindingsUi} onFindingUpdated={replaceFinding} />
           )}
           </ViewErrorBoundary>
         </main>
-        {/* One polite live region for the whole app: scan started / finished, whichever view is open. */}
-        <p className="visually-hidden" role="status" aria-live="polite">
-          {announcement}
-        </p>
       </div>
+      {/* One polite live region for the whole app: scan started / finished, whichever view is open. It sits outside
+          the app subtree, which is inert (and so silent) while the settings drawer is open. */}
+      <p className="visually-hidden" role="status" aria-live="polite">
+        {announcement}
+      </p>
       <SettingsDrawer />
     </>
   );

@@ -1,7 +1,8 @@
 import { BarChart3 } from 'lucide-react';
-import { activityAsText, ActivityLog, isCommand } from '../components/ActivityLog';
+import { activityAsText, ActivityLog, type ActivityUiState, isCommand, parseSource } from '../components/ActivityLog';
 import { CoveragePanel } from '../components/CoveragePanel';
 import { NetworkTable } from '../components/NetworkTable';
+import { scanOutcome } from '../components/ScanMonitor';
 import { EmptyState, ErrorNotice, Panel, Tag } from '../components/ui';
 import { ViewHeader } from '../components/ViewHeader';
 import type { ActivityEvent, ScanStatusResponse } from '../contracts/finding';
@@ -9,25 +10,55 @@ import { hrefFor } from '../hooks/useHashRoute';
 import { downloadText } from '../lib/download';
 import { formatDuration, formatTime } from '../lib/meta';
 
+/** A robots.txt lookup that answers 404 is the expected "no rules" outcome, not a failed request. */
+function isExpectedMiss(event: ActivityEvent) {
+  if (!event.request || event.request.status !== 404) return false;
+  try {
+    return new URL(event.request.url).pathname === '/robots.txt';
+  } catch {
+    return false;
+  }
+}
+
+/** Why the command count can be 0: npm audit is the only command, and the scan records whether it could run. */
+export function npmAuditHint(scan: ScanStatusResponse) {
+  if (scan.inspection_mode !== 'localhost') return 'npm audit runs only in Localhost mode';
+  if (!scan.repo_path) return 'npm audit needs a repository path';
+  const note = scan.modules.security.notes.find((text) => text.startsWith('npm audit'));
+  if (note) return note.replace(/\.$/, '');
+  const state = scan.modules.security.state;
+  if (state === 'done') return 'npm audit did not run: the repository has no package.json';
+  return state === 'failed' ? 'the security module failed before npm audit ran' : 'npm audit has not run yet';
+}
+
 function ScanFacts({ scan, activity }: { scan: ScanStatusResponse; activity: ActivityEvent[] }) {
   const requests = activity.filter((event) => event.request);
-  const failedRequests = requests.filter((event) => event.request?.error || (event.request?.status ?? 0) >= 400).length;
+  const failedRequests = requests.filter((event) => event.request?.error || ((event.request?.status ?? 0) >= 400 && !isExpectedMiss(event))).length;
   const count = (kinds: string[]) => activity.filter((event) => kinds.includes(event.kind)).length;
   const duration = scan.finished_at ? new Date(scan.finished_at).getTime() - new Date(scan.created_at).getTime() : null;
+  const outcome = scanOutcome(scan);
   const metrics = [
     { label: 'Requests sent', value: requests.length, detail: failedRequests ? `${failedRequests} failed` : 'none failed' },
     { label: 'Checks run', value: count(['check']), detail: 'with recorded results' },
     {
       label: 'Commands run',
       value: activity.filter(isCommand).length,
-      detail: activity.some(isCommand) ? 'with captured output' : 'npm audit needs Localhost mode and a lockfile',
+      detail: activity.some(isCommand) ? 'with captured output' : npmAuditHint(scan),
     },
     { label: 'Warnings & errors', value: count(['warning', 'error']), detail: 'in the activity log' },
   ];
   return (
     <Panel
       title="Scan"
-      actions={scan.status === 'running' ? <Tag tone="warning">Running</Tag> : <Tag tone="success">Completed in {formatDuration(duration)}</Tag>}
+      actions={
+        scan.status === 'running' ? (
+          <Tag tone="warning">Running</Tag>
+        ) : (
+          <Tag tone={outcome.tone}>
+            {outcome.label} · {formatDuration(duration)}
+          </Tag>
+        )
+      }
     >
       <dl className="facts facts-wide">
         <div>
@@ -72,12 +103,19 @@ export function AnalyticsView({
   activityDropped,
   error,
   query,
+  source,
+  ui,
+  onUiChange,
 }: {
   scan: ScanStatusResponse | null;
   activity: ActivityEvent[];
   activityDropped: number;
   error: string | null;
+  /** From the route (#/analytics?q=…&source=…): what a "Trace in Analytics" link asks to see. */
   query: string;
+  source: string | null;
+  ui: ActivityUiState;
+  onUiChange: (patch: Partial<ActivityUiState>) => void;
 }) {
   const header = <ViewHeader title="Analytics" description="What the inspector actually did: every request, check and command, with its output, and what each module covered." />;
   if (!scan) {
@@ -103,7 +141,16 @@ export function AnalyticsView({
       {header}
       {error && <ErrorNotice>{error}</ErrorNotice>}
       <ScanFacts scan={scan} activity={activity} />
-      <ActivityLog events={activity} dropped={activityDropped} running={scan.status === 'running'} initialQuery={query} onDownload={downloadLog} />
+      <ActivityLog
+        events={activity}
+        dropped={activityDropped}
+        running={scan.status === 'running'}
+        ui={ui}
+        onUiChange={onUiChange}
+        initialQuery={query}
+        initialSource={parseSource(source)}
+        onDownload={downloadLog}
+      />
       <div className="analytics-grid">
         <CoveragePanel scan={scan} />
         <NetworkTable events={activity} baseUrl={scan.target_url} />
