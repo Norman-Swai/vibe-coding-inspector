@@ -77,6 +77,18 @@ The dev server proxies `/api` to `http://127.0.0.1:8000`. Try it against the bun
 `cd tmp_test_site && python -m http.server 8765`, then scan `http://localhost:8765/` with repository path
 `<this repo>/tmp_test_repo`.
 
+## Troubleshooting
+
+- **A red "inspector API" banner, or a page that used to go blank after updating.** The backend answering on port 8000
+  is older than the UI (it was not restarted after `git pull`, or it runs from another checkout). Stop it and start it
+  again from this repository's folder: `uvicorn backend.app:app --reload --host 127.0.0.1 --port 8000`. The banner
+  clears by itself within a few seconds. Check with `curl http://127.0.0.1:8000/api/health`; it must report
+  `"api_version": 2`.
+- **"Not reachable".** Nothing is listening on 127.0.0.1:8000; start the backend as above.
+- **A view shows "This view could not be displayed".** Use *Forget the current scan*, then start a new scan; if it keeps
+  happening, the backend and UI versions differ (see the first point).
+- After switching branches run `npm install` again, and hard-refresh the browser (Cmd/Ctrl+Shift+R).
+
 ## Tests
 
 ```bash
@@ -108,6 +120,7 @@ npm run build                # type-check + production build
 
 - `POST /api/scans` — `{target_url, repo_path?, authorization_confirmed, inspection_mode, max_pages?, timeout_seconds?}`
 - `GET /api/scans/{scan_id}` — status, options, per-module reports (`modules`) and summary counts
+- `GET /api/health` — `{"status": "ok", "version": "0.2.0", "api_version": 2}`; the UI checks it before starting scans
 - `GET /api/scans/{scan_id}/findings`
 - `GET /api/scans/{scan_id}/activity?since=<seq>` — events after `seq`: requests, checks, commands and their output
 - `PATCH /api/findings/{finding_id}/review` — reason required for `rejected` / `escalated`

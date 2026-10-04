@@ -8,7 +8,7 @@ import { validateRepoPath, validateTarget } from '../components/LaunchPanel';
 import type { Finding } from '../contracts/finding';
 import { POLL_INTERVAL_MS, useScan } from '../hooks/useScan';
 import { SettingsProvider } from '../lib/settings';
-import { installMatchMedia, jsonResponse, makeFinding, makeScan } from './utils';
+import { HEALTHY, installMatchMedia, jsonResponse, makeFinding, makeScan } from './utils';
 
 describe('launch form', () => {
   it('validates the target for the selected mode', () => {
@@ -24,6 +24,7 @@ describe('launch form', () => {
     window.localStorage.setItem('vci-settings-v1', JSON.stringify({ maxPages: 12, timeoutSeconds: 5 }));
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url === '/api/health') return jsonResponse(HEALTHY);
       if (url === '/api/scans') return jsonResponse({ scan_id: 'scan-1' });
       if (url.endsWith('/findings')) return jsonResponse([makeFinding()]);
       return jsonResponse(makeScan());
@@ -35,7 +36,7 @@ describe('launch form', () => {
 
     await user.click(screen.getByRole('button', { name: /Start scan/ }));
     expect(screen.getByText('Confirm that you are authorised before scanning.')).toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).not.toContain('/api/scans');
 
     await user.type(screen.getByLabelText('Repository path (optional)'), '/srv/app');
     await user.click(screen.getByRole('checkbox', { name: /authorised/ }));

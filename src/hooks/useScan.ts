@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, apiClient } from '../api/client';
 import type { ActivityEvent, ActivityPage, Finding, ScanStatusResponse } from '../contracts/finding';
+import { MODULES } from '../lib/meta';
 
 export const POLL_INTERVAL_MS = 800;
 const MAX_BACKOFF_MS = 10_000;
@@ -18,6 +19,14 @@ function message(error: unknown) {
  * - If the backend no longer knows the scan (e.g. it restarted), polling stops and onMissing is called with a message.
  */
 export const MISSING_SCAN_MESSAGE = 'The previous scan is no longer available (the inspector API was probably restarted). Start a new scan.';
+
+/** Why a status response cannot be used by this UI (e.g. it came from an older backend), or null if it is fine. */
+export function statusIncompatibility(status: unknown): string | null {
+  const value = (status ?? {}) as Partial<ScanStatusResponse>;
+  const missing: string[] = (['status', 'options', 'modules', 'summary', 'activity_count'] as const).filter((key) => value[key] === undefined || value[key] === null);
+  if (value.modules) missing.push(...MODULES.filter((module) => !value.modules?.[module]?.state).map((module) => `modules.${module}`));
+  return missing.length ? `missing ${missing.join(', ')}` : null;
+}
 
 export function useScan(scanId: string | null, onMissing?: (message: string) => void) {
   const [scan, setScan] = useState<ScanStatusResponse | null>(null);
@@ -49,6 +58,14 @@ export function useScan(scanId: string | null, onMissing?: (message: string) => 
       try {
         const status = await apiClient.getScan(scanId);
         if (cancelled) return;
+        const incompatible = statusIncompatibility(status);
+        if (incompatible) {
+          // Rendering this would crash the views; forget the scan and say why instead.
+          missingRef.current?.(
+            `The inspector API returned this scan in an older format (${incompatible}). Restart the backend from this checkout, then start a new scan.`,
+          );
+          return;
+        }
         let page: ActivityPage | null = null;
         if (status.activity_count > knownEvents) {
           page = await apiClient.getActivity(scanId, nextSeq);

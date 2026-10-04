@@ -39,6 +39,7 @@ export function LaunchPanel({
   onDraftChange,
   busy,
   running,
+  blockedReason = null,
   error,
   onStart,
 }: {
@@ -46,6 +47,7 @@ export function LaunchPanel({
   onDraftChange: (patch: Partial<LaunchDraft>) => void;
   busy: boolean;
   running: boolean;
+  blockedReason?: string | null;
   error: string | null;
   onStart: (request: ScanRequest) => void;
 }) {
@@ -59,12 +61,13 @@ export function LaunchPanel({
 
   const targetError = validateTarget(targetUrl, mode);
   const repoError = mode === 'localhost' ? validateRepoPath(repoPath) : null;
-  const canSubmit = !targetError && !repoError && authorized && !busy && !running;
+  const canSubmit = !targetError && !repoError && authorized && !busy && !running && !blockedReason;
 
   function submit(event: FormEvent) {
     event.preventDefault();
     if (busy || running) return;
     setSubmitted(true);
+    if (blockedReason) return;
     if (!canSubmit) return;
     onStart({
       target_url: targetUrl.trim(),
@@ -143,6 +146,7 @@ export function LaunchPanel({
             {busy ? 'Starting…' : running ? 'Scan in progress…' : 'Start scan'}
           </button>
         </div>
+        {blockedReason && <p className="field-error">{blockedReason}</p>}
         {error && <ErrorNotice>{error}</ErrorNotice>}
       </form>
     </Panel>

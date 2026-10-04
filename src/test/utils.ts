@@ -66,8 +66,11 @@ export function makeEvent(overrides: Partial<ActivityEvent> & Pick<ActivityEvent
   return { at_ms: overrides.seq * 10, module: null, kind: 'step', message: `event ${overrides.seq}`, output: null, request: null, ...overrides };
 }
 
-/** Routes fetch() calls to handlers by URL, so tests read like the API they exercise. */
+export const HEALTHY = { status: 'ok', version: '0.2.0', api_version: 2 };
+
+/** Routes fetch() calls to handlers by URL, so tests read like the API they exercise. A healthy /api/health is included. */
 export function mockApi(routes: Record<string, (url: string, init?: RequestInit) => Response | Promise<Response>>) {
+  routes = { '/api/health': () => jsonResponse(HEALTHY), ...routes };
   return async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const key = Object.keys(routes)

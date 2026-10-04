@@ -1,12 +1,15 @@
 import { BarChart3, Home, ListChecks, Rocket, ScanSearch, Settings as SettingsIcon } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiClient } from './api/client';
+import { BackendBanner } from './components/BackendBanner';
 import { EMPTY_FINDINGS_UI, type FindingsUiState } from './components/FindingsPanel';
 import { EMPTY_DRAFT, type LaunchDraft } from './components/LaunchPanel';
 import { finishedModules } from './components/ScanMonitor';
 import { SettingsDrawer } from './components/SettingsDrawer';
+import { ViewErrorBoundary } from './components/ViewErrorBoundary';
 import type { ScanRequest } from './contracts/finding';
 import { hrefFor, useHashRoute, type View } from './hooks/useHashRoute';
+import { useBackendHealth } from './hooks/useBackendHealth';
 import { useScan } from './hooks/useScan';
 import { MODULES, redactSecrets } from './lib/meta';
 import { SettingsProvider, useSettings } from './lib/settings';
@@ -62,6 +65,9 @@ function Workspace() {
     setNotice(message);
   }, []);
   const { scan, findings, activity, activityDropped, error: pollError, replaceFinding } = useScan(scanId, forgetScan);
+  const health = useBackendHealth();
+  const blockedReason =
+    health.kind === 'outdated' || health.kind === 'unreachable' ? 'The inspector API needs attention first (see the message at the top of the page).' : null;
   const error = pollError ?? notice;
   const running = scan?.status === 'running';
   // From the same snapshot as the status, so live text and badges never show a stale count.
@@ -159,6 +165,8 @@ function Workspace() {
         </header>
 
         <main id="main" className="page" data-view={view} tabIndex={-1}>
+          <BackendBanner health={health} />
+          <ViewErrorBoundary resetKey={`${view}|${scanId ?? ''}`} onForgetScan={() => forgetScan('The current scan was forgotten after the view failed to display.')}>
           {view === 'overview' && <OverviewView scan={scan} findingsCount={findingsCount} />}
           {view === 'launch' && (
             <LaunchView
@@ -170,6 +178,7 @@ function Workspace() {
               starting={starting}
               startError={startError}
               localStart={localStart}
+              blockedReason={blockedReason}
               onStart={(request) => void startScan(request)}
             />
           )}
@@ -177,6 +186,7 @@ function Workspace() {
           {view === 'findings' && (
             <FindingsView scan={scan} findings={findings} error={error} ui={findingsUi} onUiChange={updateFindingsUi} onFindingUpdated={replaceFinding} />
           )}
+          </ViewErrorBoundary>
         </main>
         {/* One polite live region for the whole app: scan started / finished, whichever view is open. */}
         <p className="visually-hidden" role="status" aria-live="polite">

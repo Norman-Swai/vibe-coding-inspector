@@ -12,6 +12,7 @@ export function LaunchView({
   starting,
   startError,
   localStart,
+  blockedReason,
   onStart,
 }: {
   draft: LaunchDraft;
@@ -22,6 +23,7 @@ export function LaunchView({
   starting: boolean;
   startError: string | null;
   localStart: number | null;
+  blockedReason: string | null;
   onStart: (request: ScanRequest) => void;
 }) {
   return (
@@ -31,7 +33,7 @@ export function LaunchView({
         description="Enter the address of an app you own or are authorised to test. Scans are read-only; progress appears on the right as each module works."
       />
       <div className="launch-grid">
-        <LaunchPanel draft={draft} onDraftChange={onDraftChange} busy={starting} running={scan?.status === 'running'} error={startError} onStart={onStart} />
+        <LaunchPanel draft={draft} onDraftChange={onDraftChange} busy={starting} running={scan?.status === 'running'} blockedReason={blockedReason} error={startError} onStart={onStart} />
         <ScanMonitor scan={scan} error={error} findingsCount={findingsCount} localStart={localStart} />
       </div>
     </>

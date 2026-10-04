@@ -176,3 +176,7 @@ def test_failed_module_is_logged_as_an_error():
     assert {event['module'] for event in errors} >= {'runtime', 'security', 'compliance'}
     assert all('connection refused' in event['message'] for event in errors)
     assert any(event['kind'] == 'warning' and event['request'] and event['request']['error'] for event in events)
+
+
+def test_health_reports_the_api_version_the_ui_requires():
+    assert client.get('/api/health').json() == {'status': 'ok', 'version': '0.2.0', 'api_version': 2}

@@ -28,6 +28,8 @@ from .schemas import (
 )
 
 LOCAL_HOSTS = {'localhost', '127.0.0.1', '::1'}
+# Bump when the response shapes the UI depends on change; the UI refuses to start scans against an older API.
+API_VERSION = 2
 # The UI is served through the Vite proxy, so cross-origin access is only needed for local tooling.
 # Never use "*": any website a user visits could otherwise start repo scans and read their findings.
 DEFAULT_CORS_ORIGINS = 'http://localhost:5173,http://127.0.0.1:5173'
@@ -39,6 +41,12 @@ app.add_middleware(
     allow_methods=['GET', 'POST', 'PATCH'],
     allow_headers=['Content-Type'],
 )
+
+
+@app.get('/api/health')
+def health() -> dict:
+    """Lets the UI confirm it is talking to a compatible backend before starting scans."""
+    return {'status': 'ok', 'version': app.version, 'api_version': API_VERSION}
 
 
 def _validate_request(payload: ScanRequest) -> None:

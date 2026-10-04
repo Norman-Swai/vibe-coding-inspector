@@ -43,7 +43,19 @@ async function json<T>(path: string, init?: RequestInit): Promise<T> {
 
 export type ReportFormat = 'markdown' | 'json';
 
+/** The backend API version this UI was built against (backend/app.py API_VERSION). */
+export const REQUIRED_API_VERSION = 2;
+
+export interface HealthResponse {
+  status: string;
+  version: string;
+  api_version: number;
+}
+
 export const apiClient = {
+  health() {
+    return json<HealthResponse>('/health');
+  },
   startScan(payload: ScanRequest) {
     return json<{ scan_id: string }>('/scans', { method: 'POST', body: JSON.stringify(payload) });
   },
