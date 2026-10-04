@@ -4,6 +4,7 @@ import pytest
 
 from backend.analyzers.common import ScanError
 from backend.analyzers.runtime import run_runtime_analysis
+from backend.schemas import ActivityKind
 
 from .helpers import make_context, page, titles
 
@@ -114,4 +115,44 @@ def test_public_mode_respects_robots_txt(site):
 
     assert site.hits['/private/admin'] == 0
     assert site.hits['/open'] == 1
-    assert any('robots.txt disallows' in note for note in result.notes)
+    assert site.requests[0] == '/robots.txt'
+    assert '1 URL skipped because robots.txt disallows it.' in result.notes
+
+
+def test_public_mode_reads_robots_txt_first_and_never_requests_a_disallowed_start_url(site):
+    site.add('/robots.txt', 'User-agent: *\nDisallow: /\n', content_type='text/plain')
+    site.add('/', page('<a href="/about">About</a>'))
+    context = make_context(site.url + '/', public=True)
+
+    with pytest.raises(ScanError, match='robots.txt disallows .*; public read-only mode does not fetch it'):
+        run_runtime_analysis(context)
+
+    assert site.requests == ['/robots.txt']
+    assert (ActivityKind.warning, f'robots.txt disallows {site.url}/; public read-only mode does not fetch it') in [
+        (event.kind, event.message) for event in context.activity.events
+    ]
+
+
+def test_robots_lookup_is_logged_as_a_check_not_as_a_failed_page_request(site):
+    site.add('/', page('ok'))
+    context = make_context(site.url + '/', public=True)
+
+    run_runtime_analysis(context)
+
+    assert site.requests[:2] == ['/robots.txt', '/']
+    [lookup] = [event for event in context.activity.events if event.request and event.request.url.endswith('/robots.txt')]
+    assert lookup.kind == ActivityKind.check
+    assert lookup.message == 'robots.txt not found (404); all paths allowed'
+    assert lookup.request.status == 404
+
+
+def test_localhost_scan_refuses_a_target_that_redirects_to_another_host(site):
+    site.add('/', '', status=302, headers={'Location': 'http://example.com/'})
+    context = make_context(site.url + '/')
+
+    with pytest.raises(ScanError, match='redirect to example.com blocked: localhost mode only contacts local hosts'):
+        run_runtime_analysis(context)
+
+    [event] = [event for event in context.activity.events if event.request]
+    assert event.kind == ActivityKind.warning
+    assert event.request.error == 'redirect to example.com blocked: localhost mode only contacts local hosts'

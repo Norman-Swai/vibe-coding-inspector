@@ -9,7 +9,7 @@ from typing import Callable, Dict, List, Optional, TypeVar
 
 from .analyzers.common import ScanError, plural, redact_secrets, truncate
 from .analyzers.repo import MAX_FILE_BYTES, RepoIndex
-from .analyzers.web import CrawlResult, FetchResult, PageFetcher, crawl, normalize_url
+from .analyzers.web import CrawlResult, FetchResult, PageFetcher, Robots, crawl, load_robots, normalize_url, require_allowed
 from .schemas import ActivityEvent, ActivityKind, InspectionMode, ModuleName, RequestInfo, ScanRecord
 
 T = TypeVar('T')
@@ -70,8 +70,8 @@ class ActivityRecorder:
             logger.exception('Could not record activity event: %.200s', message)
 
 
-def request_event(result: FetchResult) -> tuple[str, RequestInfo]:
-    info = RequestInfo(
+def request_info(result: FetchResult) -> RequestInfo:
+    return RequestInfo(
         url=result.requested_url,
         final_url=result.url if result.url != result.requested_url else None,
         status=result.status,
@@ -80,6 +80,10 @@ def request_event(result: FetchResult) -> tuple[str, RequestInfo]:
         duration_ms=result.elapsed_ms,
         error=result.error,
     )
+
+
+def request_event(result: FetchResult) -> tuple[str, RequestInfo]:
+    info = request_info(result)
     if result.error:
         message = f'GET {result.requested_url} failed: {result.error}'
     else:
@@ -99,7 +103,8 @@ class ScanContext:
         self.mode = record.inspection_mode
         self.options = record.options
         self.activity = ActivityRecorder(sink)
-        self.fetcher = PageFetcher(timeout=record.options.timeout_seconds, on_result=self._log_request)
+        # Localhost mode must never contact another host, so the fetcher refuses redirects away from local hosts.
+        self.fetcher = PageFetcher(timeout=record.options.timeout_seconds, on_result=self._log_request, local_only=not self.is_public)
         self._lock = threading.Lock()
         self._memo: Dict[str, Future] = {}
 
@@ -115,7 +120,27 @@ class ScanContext:
         kind = ActivityKind.request if result.error is None else ActivityKind.warning
         self.activity.emit(None, kind, message, request=info)
 
+    def _emit_shared(self, kind: ActivityKind, message: str, output: Optional[str] = None, result: Optional[FetchResult] = None) -> None:
+        """Activity of the shared crawler and robots lookup, optionally describing the request it made."""
+        self.activity.emit(None, kind, message, output, request_info(result) if result is not None else None)
+
+    def robots(self) -> Optional[Robots]:
+        """robots.txt of the target's origin, read once before any page is requested. Localhost mode does not use it."""
+        if not self.is_public:
+            return None
+        return self._once('robots', self._load_robots)
+
+    def _load_robots(self) -> Robots:
+        robots = load_robots(self.fetcher, self.target_url, self._emit_shared)
+        if robots.parser is not None:
+            if robots.allows(self.target_url):
+                self.emit(None, ActivityKind.check, f'robots.txt allows {self.target_url}')
+            else:
+                self.emit(None, ActivityKind.warning, f'robots.txt disallows {self.target_url}; public read-only mode does not fetch it')
+        return robots
+
     def target_page(self) -> FetchResult:
+        require_allowed(self.robots(), self.target_url)
         page = self.fetcher.get(self.target_url)
         if page.error:
             raise ScanError(f'Could not reach {self.target_url}: {page.error}')
@@ -124,13 +149,7 @@ class ScanContext:
     def crawl(self) -> CrawlResult:
         return self._once(
             'crawl',
-            lambda: crawl(
-                self.fetcher,
-                self.target_url,
-                self.options.max_pages,
-                respect_robots=self.is_public,
-                emit=lambda kind, message, output=None: self.emit(None, kind, message, output),
-            ),
+            lambda: crawl(self.fetcher, self.target_url, self.options.max_pages, robots=self.robots(), emit=self._emit_shared),
         )
 
     def repo(self) -> RepoIndex:

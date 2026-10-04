@@ -17,6 +17,7 @@ from .common import (
     PLACEHOLDER,
     AnalyzerResult,
     Rule,
+    ScanError,
     Tokens,
     is_placeholder,
     mask_secret,
@@ -592,20 +593,32 @@ def _header_report(page: FetchResult) -> str:
 
 def run_security_analysis(context: 'ScanContext') -> AnalyzerResult:
     result = AnalyzerResult()
-    page = context.target_page()
-    scanned_parts = ['1 page response']
-    if page.ok and page.is_html:
-        header_findings = check_response(page, context.is_public)
-        result.findings.extend(header_findings)
-        context.emit(MODULE, ActivityKind.check, f'Response headers of {page.url}: {plural(len(header_findings), "issue")}', _header_report(page))
-    else:
-        note = f'Header checks skipped: the target returned {page.status} {page.content_type or "(no content type)"} instead of an HTML page.'
+    scanned_parts: List[str] = []
+    try:
+        page: Optional[FetchResult] = context.target_page()
+    except ScanError as exc:
+        # The repository checks do not need the site, so they still run; the module only fails when nothing could be inspected.
+        page, unreachable = None, str(exc)
+        note = f'Header checks skipped: {unreachable}'
         result.notes.append(note)
         context.emit(MODULE, ActivityKind.warning, note)
-    if urlparse(page.url).scheme == 'http' and not context.is_public:
-        result.notes.append('HTTPS and HSTS checks do not apply to an http:// development server in localhost mode.')
+    else:
+        scanned_parts.append('1 page response')
+        result.scanned += 1
+        if page.ok and page.is_html:
+            header_findings = check_response(page, context.is_public)
+            result.findings.extend(header_findings)
+            context.emit(MODULE, ActivityKind.check, f'Response headers of {page.url}: {plural(len(header_findings), "issue")}', _header_report(page))
+        else:
+            note = f'Header checks skipped: the target returned {page.status} {page.content_type or "(no content type)"} instead of an HTML page.'
+            result.notes.append(note)
+            context.emit(MODULE, ActivityKind.warning, note)
+        if urlparse(page.url).scheme == 'http' and not context.is_public:
+            result.notes.append('HTTPS and HSTS checks do not apply to an http:// development server in localhost mode.')
 
     if context.repo_path is None:
+        if page is None:
+            raise ScanError(unreachable)
         result.notes.append('Secret, code-sink and dependency checks skipped: no repository path was provided.')
         context.emit(MODULE, ActivityKind.step, 'Repository checks skipped: no repository path was provided')
     else:
@@ -640,7 +653,6 @@ def run_security_analysis(context: 'ScanContext') -> AnalyzerResult:
         if audit.note:
             result.notes.append(audit.note)
         scanned_parts.append(plural(len(repo.files), 'file'))
-        result.scanned = len(repo.files)
-    result.scanned += 1
+        result.scanned += len(repo.files)
     result.scanned_label = ', '.join(scanned_parts)
     return result

@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
+from .analyzers.web import LOCAL_HOSTS, url_host
 from .orchestrator import orchestrator, store
 from .schemas import (
     SEVERITY_ORDER,
@@ -30,7 +31,8 @@ from .schemas import (
     ScanStatusResponse,
 )
 
-LOCAL_HOSTS = {'localhost', '127.0.0.1', '::1'}
+# Whitespace, control characters and backslashes: never part of a valid URL, and parsed differently by browsers and clients.
+_UNSAFE_URL_CHARS = re.compile(r'[\s\x00-\x1f\x7f\\]')
 # Bump when the response shapes the UI depends on change; the UI refuses to start scans against an older API.
 API_VERSION = 2
 # The UI is served through the Vite proxy, so cross-origin access is only needed for local tooling.
@@ -53,12 +55,18 @@ def health() -> dict:
 
 
 def _validate_request(payload: ScanRequest) -> None:
-    parsed = urlparse(payload.target_url)
-    if parsed.scheme not in {'http', 'https'} or not parsed.hostname:
+    url = payload.target_url
+    parsed = urlparse(url)
+    # The host is taken from the parser the HTTP client uses: it reads backslashes, userinfo and out-of-range ports
+    # differently from urllib.parse, and the mode check must apply to the host that will actually be contacted.
+    host = url_host(url)
+    if parsed.scheme not in {'http', 'https'} or not host or _UNSAFE_URL_CHARS.search(url):
         raise HTTPException(status_code=400, detail='Enter a full http:// or https:// URL.')
+    if '@' in parsed.netloc:
+        raise HTTPException(status_code=400, detail='Enter the URL without a username or password.')
     if not payload.authorization_confirmed:
         raise HTTPException(status_code=400, detail='Authorization confirmation is required.')
-    if payload.inspection_mode == InspectionMode.localhost and parsed.hostname not in LOCAL_HOSTS:
+    if payload.inspection_mode == InspectionMode.localhost and host not in LOCAL_HOSTS:
         raise HTTPException(status_code=400, detail='Localhost mode only accepts localhost, 127.0.0.1, or [::1].')
     if payload.repo_path:
         if payload.inspection_mode == InspectionMode.public_readonly:
@@ -72,6 +80,7 @@ def _validate_request(payload: ScanRequest) -> None:
 
 @app.post('/api/scans', response_model=ScanStartResponse)
 def start_scan(payload: ScanRequest) -> ScanStartResponse:
+    payload.target_url = payload.target_url.strip()
     payload.repo_path = (payload.repo_path or '').strip() or None
     _validate_request(payload)
     record = orchestrator.start_scan(payload)

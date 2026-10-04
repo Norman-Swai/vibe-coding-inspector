@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 
 class Severity(str, Enum):
@@ -124,7 +124,8 @@ class ScanOptions(BaseModel):
 class ScanRequest(ScanOptions):
     target_url: str
     repo_path: Optional[str] = None
-    authorization_confirmed: bool
+    # Consent must be an explicit boolean; strings such as "yes" are not accepted.
+    authorization_confirmed: StrictBool
     inspection_mode: InspectionMode = InspectionMode.localhost
 
 

@@ -295,7 +295,7 @@ def _coverage_notes(crawl: CrawlResult, max_pages: int) -> List[str]:
             '— raise "Max pages" in Settings to cover them.'
         )
     if crawl.robots_skipped:
-        notes.append(f'{plural(len(crawl.robots_skipped), "URL")} skipped because robots.txt disallows them.')
+        notes.append(f'{plural(len(crawl.robots_skipped), "URL")} skipped because robots.txt disallows {"it" if len(crawl.robots_skipped) == 1 else "them"}.')
     auth = [page.url for page in crawl.pages if page.status in _AUTH_STATUSES]
     if auth:
         notes.append(f'{plural(len(auth), "URL")} require authentication (401/403) and were not inspected.')

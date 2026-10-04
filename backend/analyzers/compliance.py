@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from ..schemas import ActivityKind, Finding, Location, ModuleName, Severity, Verification
 from .common import AnalyzerResult, Rule, element_line, new_finding, plural
-from .web import Anchor, CrawlResult
+from .web import Anchor, CrawlResult, FetchResult
 
 if TYPE_CHECKING:
     from ..context import ScanContext
@@ -38,6 +38,15 @@ MISSING_LINK = Rule(
     description='No link to this page was found on any crawled page.',
     impact='Visitors cannot find the information, which reduces trust and can breach legal requirements.',
     fix='Add a clearly labelled link in the site footer or main navigation.',
+)
+BROKEN_LINK = Rule(
+    title='Required link is broken',
+    severity=Severity.medium,
+    verification=Verification.confirmed,
+    check='The matched link was requested during the crawl; HTTP status 400 or higher, or a failed request, is reported.',
+    description='A link to this page exists, but the page does not load.',
+    impact='Visitors who follow the link reach an error instead of the information, so the requirement is not met in practice.',
+    fix='Fix the route or update the link so that the page loads.',
 )
 COOKIES_WITHOUT_CONSENT = Rule(
     title='Cookies or trackers without a visible consent mechanism',
@@ -72,12 +81,29 @@ def _tokens(anchor: Anchor) -> set:
     return set(re.split(r'[^a-z0-9]+', f'{anchor.text} {anchor.raw_href}'.lower())) - {''}
 
 
-def _match(requirement: Requirement, anchors: List[Anchor]) -> Optional[Anchor]:
-    for anchor in anchors:
-        tokens = _tokens(anchor)
-        if any(keyword in tokens or (len(keyword) > 5 and keyword in ' '.join(tokens)) for keyword in requirement.keywords):
-            return anchor
-    return None
+def _matches(requirement: Requirement, anchor: Anchor) -> bool:
+    tokens = _tokens(anchor)
+    return any(keyword in tokens or (len(keyword) > 5 and keyword in ' '.join(tokens)) for keyword in requirement.keywords)
+
+
+def _match(requirement: Requirement, crawl: CrawlResult, pages: Dict[str, FetchResult]) -> Tuple[Optional[Anchor], Optional[FetchResult]]:
+    """The first matching link and the crawl's response for its target, if it was requested. A link that loaded is preferred."""
+    matches = [(anchor, pages.get(anchor.href)) for anchor in crawl.anchors if _matches(requirement, anchor)]
+    return next((match for match in matches if match[1] is not None and match[1].ok), matches[0] if matches else (None, None))
+
+
+def _not_verified(crawl: CrawlResult, anchor: Anchor) -> str:
+    """Why the crawl did not request the link target."""
+    parsed = urlparse(anchor.href)
+    if parsed.scheme not in {'http', 'https'}:
+        return f'{parsed.scheme}: link'
+    if parsed.netloc != crawl.origin:
+        return 'off-site'
+    if anchor.href in crawl.robots_skipped:
+        return 'robots.txt disallows it'
+    if anchor.href in crawl.unchecked:
+        return 'page limit reached'
+    return 'not requested'
 
 
 def _links_evidence(crawl: CrawlResult, requirement: Requirement) -> str:
@@ -94,15 +120,41 @@ def _links_evidence(crawl: CrawlResult, requirement: Requirement) -> str:
     )
 
 
-def check_links(crawl: CrawlResult) -> Tuple[List[Finding], List[str], List[str]]:
-    """Findings for missing requirements, plus 'name → url' for each found one and the names of missing ones."""
+def check_links(crawl: CrawlResult) -> Tuple[List[Finding], List[str], List[str], List[str]]:
+    """Findings for missing and broken requirements, plus 'name → url (…)' for found and broken ones and the names of missing ones.
+
+    A match is verified against the crawl: a link whose target loaded is found, one whose target failed is broken, and one
+    the crawl did not request (off-site, robots.txt, page limit) is found but marked as not verified.
+    """
     findings: List[Finding] = []
     found: List[str] = []
+    broken: List[str] = []
     missing: List[str] = []
+    pages = {page.requested_url: page for page in crawl.pages}
+    for page in crawl.pages:
+        pages.setdefault(page.url, page)
     for requirement in REQUIREMENTS:
-        anchor = _match(requirement, crawl.anchors)
+        anchor, page = _match(requirement, crawl, pages)
+        if anchor and page is None:
+            found.append(f'{requirement.name} → {anchor.href} (not verified: {_not_verified(crawl, anchor)})')
+            continue
+        if anchor and page.ok:
+            found.append(f'{requirement.name} → {anchor.href} (verified, HTTP {page.status})')
+            continue
         if anchor:
-            found.append(f'{requirement.name} → {anchor.href}')
+            status = f'HTTP {page.status}' if page.status else page.error
+            broken.append(f'{requirement.name} → {anchor.href} ({status})')
+            findings.append(
+                new_finding(
+                    MODULE,
+                    BROKEN_LINK,
+                    title=f'{requirement.name.capitalize()} link is broken ({status})',
+                    severity=requirement.severity,
+                    location=Location(url=anchor.page, line_start=anchor.line, element=anchor.html),
+                    snippet=f'{anchor.describe()}\n{page.describe()}',
+                    captured=page.describe(),
+                )
+            )
             continue
         missing.append(requirement.name)
         rule = replace(MISSING_LINK, title=f'No {requirement.name} link found', description=f'{MISSING_LINK.description} {requirement.why}')
@@ -116,7 +168,7 @@ def check_links(crawl: CrawlResult) -> Tuple[List[Finding], List[str], List[str]
                 captured=f'{plural(len(crawl.html_pages), "HTML page")} crawled from {crawl.start_url}',
             )
         )
-    return findings, found, missing
+    return findings, found, broken, missing
 
 
 def check_cookie_consent(crawl: CrawlResult) -> Tuple[Optional[Finding], str]:
@@ -163,21 +215,22 @@ def check_cookie_consent(crawl: CrawlResult) -> Tuple[Optional[Finding], str]:
 
 def run_compliance_analysis(context: 'ScanContext') -> AnalyzerResult:
     crawl = context.crawl()
-    findings, found, missing = check_links(crawl)
+    findings, found, broken, missing = check_links(crawl)
     unique_links = len({(anchor.raw_href, anchor.text) for anchor in crawl.anchors})
     context.emit(
         MODULE,
         ActivityKind.check,
-        f'Searched {plural(unique_links, "unique link")} on {plural(len(crawl.html_pages), "page")} for {len(REQUIREMENTS)} required pages: {len(found)} found',
+        f'Searched {plural(unique_links, "unique link")} on {plural(len(crawl.html_pages), "page")} for {len(REQUIREMENTS)} required pages: '
+        f'{len(found)} found, {len(broken)} broken, {len(missing)} missing',
         '\n'.join(
-            [*(f'found    {item}' for item in found), *(f'missing  {name}' for name in missing)]
+            [*(f'found    {item}' for item in found), *(f'broken   {item}' for item in broken), *(f'missing  {name}' for name in missing)]
         ),
     )
     consent_finding, consent_note = check_cookie_consent(crawl)
     if consent_finding:
         findings.append(consent_finding)
     context.emit(MODULE, ActivityKind.check, consent_note, consent_finding.evidence.snippet if consent_finding else None)
-    notes = [*(f'Found {item}' for item in found), consent_note]
+    notes = [*(f'Found {item}' for item in found), *(f'Broken link: {item}' for item in broken), consent_note]
     if crawl.unchecked:
         notes.append('Some pages were not crawled because of the page limit; links on them were not searched.')
     return AnalyzerResult(

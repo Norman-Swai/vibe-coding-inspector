@@ -18,11 +18,14 @@ class FixtureSite:
     def __init__(self) -> None:
         self.routes: Dict[str, Tuple[int, Dict[str, HeaderValue], str]] = {}
         self.hits: Counter = Counter()
+        # Every path requested, in order, so tests can assert what was fetched first.
+        self.requests: List[str] = []
         site = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802 - stdlib naming
                 site.hits[self.path] += 1
+                site.requests.append(self.path)
                 status, headers, body = site.routes.get(self.path, (404, {'Content-Type': 'text/html'}, '<html><body>Not found</body></html>'))
                 data = body.encode()
                 self.send_response(status)

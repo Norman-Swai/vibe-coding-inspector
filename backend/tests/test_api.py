@@ -210,6 +210,12 @@ def test_markdown_coverage_shows_each_module_label_once():
     [
         ({'target_url': 'http://example.com/'}, 'Localhost mode only accepts'),
         ({'target_url': 'ftp://localhost/'}, 'http:// or https://'),
+        # urllib.parse reads these as localhost; the HTTP client would contact example.com or fail on the port/space.
+        ({'target_url': 'http://example.com\\@localhost:8765/'}, 'http:// or https://'),
+        ({'target_url': 'http://localhost:99999/'}, 'http:// or https://'),
+        ({'target_url': 'http://local host:8765/'}, 'http:// or https://'),
+        ({'target_url': 'http://localhost:3000/\tpath'}, 'http:// or https://'),
+        ({'target_url': 'http://user:secret@localhost:3000/'}, 'without a username or password'),
         ({'authorization_confirmed': False}, 'Authorization confirmation'),
         ({'repo_path': 'relative/path'}, 'must be absolute'),
         ({'repo_path': '/definitely/not/here'}, 'not a directory'),
@@ -221,6 +227,22 @@ def test_invalid_scan_requests_are_rejected(payload, message):
     response = client.post('/api/scans', json=body)
     assert response.status_code == 400
     assert message in response.json()['detail']
+
+
+def test_target_url_is_trimmed_and_consent_must_be_a_real_boolean(site):
+    site.add('/', page('ok'))
+    status = wait(start(f'  {site.url}/  '))
+    assert status['target_url'] == site.url + '/'
+
+    response = client.post('/api/scans', json={'target_url': site.url + '/', 'authorization_confirmed': 'yes', 'inspection_mode': 'localhost'})
+    assert response.status_code == 422
+
+
+def test_localhost_scan_does_not_follow_the_target_to_another_host(site):
+    site.add('/', '', status=302, headers={'Location': 'http://example.com/'})
+    status = wait(start(site.url + '/'))
+    for module in ('runtime', 'security', 'compliance'):
+        assert 'redirect to example.com blocked: localhost mode only contacts local hosts' in status['modules'][module]['error'], module
 
 
 def test_scan_limits_are_bounded():

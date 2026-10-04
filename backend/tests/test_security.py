@@ -1,8 +1,14 @@
-from backend.analyzers.repo import RepoIndex
-from backend.analyzers.security import check_response, run_npm_audit, scan_env_files, scan_secrets, scan_sinks
-from backend.analyzers.web import PageFetcher
+import socket
 
-from .helpers import page, titles, write_files
+import pytest
+
+from backend.analyzers.common import ScanError
+from backend.analyzers.repo import RepoIndex
+from backend.analyzers.security import check_response, run_npm_audit, run_security_analysis, scan_env_files, scan_secrets, scan_sinks
+from backend.analyzers.web import PageFetcher
+from backend.schemas import ActivityKind
+
+from .helpers import make_context, page, titles, write_files
 
 HARDENED = {
     'Content-Security-Policy': "default-src 'self'; frame-ancestors 'none'",
@@ -165,3 +171,22 @@ def test_npm_audit_explains_why_it_did_not_run(tmp_path):
     audit = run_npm_audit(RepoIndex(tmp_path))
     assert audit.findings == [] and audit.command is None
     assert 'no package-lock.json' in audit.note
+
+
+def test_repository_checks_still_run_when_the_target_is_unreachable(tmp_path):
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0))
+        port = sock.getsockname()[1]
+    repo = write_files(tmp_path, {'app.js': "const token = 'q8f7a6s5d4f3g2h1';\n"})
+    context = make_context(f'http://127.0.0.1:{port}/', repo=repo)
+
+    result = run_security_analysis(context)
+
+    assert titles(result.findings) == ['Possible secret assigned to "token" in source code']
+    assert result.scanned_label == '1 file'
+    assert any(note.startswith('Header checks skipped: Could not reach') and 'connection refused' in note for note in result.notes)
+    assert any(event.kind == ActivityKind.warning and event.message.startswith('Header checks skipped') for event in context.activity.events)
+
+    # Without a repository there is nothing left to inspect, so the module fails with the reason.
+    with pytest.raises(ScanError, match='connection refused'):
+        run_security_analysis(make_context(f'http://127.0.0.1:{port}/'))
