@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 from bs4 import Comment, NavigableString
 
 from ..schemas import ActivityKind, Location, ModuleName, Severity, Verification
-from .common import AnalyzerResult, Rule, element_line, new_finding, plural, start_tag, truncate
+from .common import AUTH_STATUSES, AnalyzerResult, Rule, element_line, new_finding, plural, start_tag, truncate
 from .web import CrawlResult, FetchResult
 
 if TYPE_CHECKING:
@@ -112,7 +112,6 @@ _MIXED_CONTENT_ATTRS = [
     ('script', 'src'), ('link', 'href'), ('img', 'src'), ('iframe', 'src'), ('audio', 'src'), ('video', 'src'),
     ('source', 'src'), ('embed', 'src'), ('object', 'data'), ('form', 'action'),
 ]
-_AUTH_STATUSES = {401, 403, 407}
 
 # (page url, tag) pairs collected across the crawl, grouped into one finding per rule.
 Hits = List[Tuple[str, 'Tag']]
@@ -126,7 +125,7 @@ def run_runtime_analysis(context: 'ScanContext') -> AnalyzerResult:
 
     broken = _broken_links(crawl, context.options.timeout_seconds)
     result.findings.extend(broken)
-    failing = [page for page in crawl.pages if not page.ok and page.status not in _AUTH_STATUSES]
+    failing = [page for page in crawl.pages if not page.ok and page.status not in AUTH_STATUSES]
     context.emit(
         MODULE,
         ActivityKind.check,
@@ -193,7 +192,7 @@ def _page_summary(grouped: dict, before: dict, error_text: bool, https: bool) ->
 def _broken_links(crawl: CrawlResult, timeout: float) -> list:
     findings = []
     for page in crawl.pages:
-        if page.ok or page.status in _AUTH_STATUSES:
+        if page.ok or page.status in AUTH_STATUSES:
             continue
         path = _short(page.requested_url, crawl)
         referrers = crawl.referrers(page.requested_url)
@@ -296,7 +295,7 @@ def _coverage_notes(crawl: CrawlResult, max_pages: int) -> List[str]:
         )
     if crawl.robots_skipped:
         notes.append(f'{plural(len(crawl.robots_skipped), "URL")} skipped because robots.txt disallows {"it" if len(crawl.robots_skipped) == 1 else "them"}.')
-    auth = [page.url for page in crawl.pages if page.status in _AUTH_STATUSES]
+    auth = [page.url for page in crawl.pages if page.status in AUTH_STATUSES]
     if auth:
         notes.append(f'{plural(len(auth), "URL")} require authentication (401/403) and were not inspected.')
     truncated = [page.url for page in crawl.pages if page.truncated]

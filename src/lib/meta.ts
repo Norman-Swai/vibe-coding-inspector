@@ -16,7 +16,7 @@ import {
   SignalLow,
   SquareTerminal,
 } from 'lucide-react';
-import type { ActivityKind, FileLocation, ModuleName, ModuleState, Severity } from '../contracts/finding';
+import type { ActivityKind, FileLocation, ModuleName, ModuleState, RequestInfo, Severity } from '../contracts/finding';
 
 // Single source of labels and icons. Colours live in styles.css, keyed by data-severity / data-state.
 
@@ -170,4 +170,14 @@ function mask(value: string) {
 export function redactSecrets(text: string): string {
   const masked = SECRET_SHAPES.reduce((value, pattern) => value.replace(pattern, (match) => (match.includes('••••••') ? match : mask(match))), text);
   return masked.replace(SECRET_QUERY_VALUE, (_, name: string, value: string) => (value.includes('••••••') ? name + value : name + mask(value)));
+}
+
+/** A robots.txt lookup that answers 404 is the expected "no rules" outcome, not a failed request. */
+export function isExpectedMiss(request: Pick<RequestInfo, 'url' | 'status'>) {
+  if (request.status !== 404) return false;
+  try {
+    return new URL(request.url).pathname === '/robots.txt';
+  } catch {
+    return false;
+  }
 }

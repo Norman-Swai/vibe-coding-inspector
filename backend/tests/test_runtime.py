@@ -6,7 +6,7 @@ from backend.analyzers.common import ScanError
 from backend.analyzers.runtime import run_runtime_analysis
 from backend.schemas import ActivityKind
 
-from .helpers import make_context, page, titles
+from .helpers import FixtureSite, make_context, page, titles
 
 
 def test_broken_link_reports_status_and_the_line_that_links_to_it(site):
@@ -156,3 +156,40 @@ def test_localhost_scan_refuses_a_target_that_redirects_to_another_host(site):
     [event] = [event for event in context.activity.events if event.request]
     assert event.kind == ActivityKind.warning
     assert event.request.error == 'redirect to example.com blocked: localhost mode only contacts local hosts'
+
+
+def test_public_mode_does_not_analyse_a_redirect_target_that_robots_txt_disallows(site):
+    site.add('/robots.txt', 'User-agent: *\nDisallow: /app\n', content_type='text/plain')
+    site.add('/', '', status=302, headers={'Location': '/app'})
+    site.add('/app', page('<a href="/app/more">More</a>'))
+    context = make_context(site.url + '/', public=True)
+
+    with pytest.raises(ScanError, match=f'robots.txt disallows {site.url}/app, which {site.url}/ redirected to; public read-only mode does not analyse it'):
+        run_runtime_analysis(context)
+    with pytest.raises(ScanError, match='redirected to; public read-only mode does not analyse it'):
+        context.target_page()
+
+    # The redirect is followed before the destination is known; nothing on the disallowed page is requested afterwards.
+    assert site.requests == ['/robots.txt', '/', '/app']
+
+
+def test_public_mode_reads_the_robots_txt_of_the_origin_a_target_redirects_to(site):
+    other = FixtureSite()
+    try:
+        other.add('/robots.txt', 'User-agent: *\nDisallow: /landing\n', content_type='text/plain')
+        other.add('/landing', page('<a href="/landing/next">Next</a>'))
+        site.add('/', '', status=302, headers={'Location': other.url + '/landing'})
+        context = make_context(site.url + '/', public=True)
+
+        with pytest.raises(ScanError, match=f'robots.txt disallows {other.url}/landing, which {site.url}/ redirected to'):
+            run_runtime_analysis(context)
+
+        assert site.requests == ['/robots.txt', '/']
+        assert other.requests == ['/landing', '/robots.txt']
+        assert other.hits['/landing/next'] == 0
+        # One lookup per origin, shared by every module.
+        with pytest.raises(ScanError):
+            context.target_page()
+        assert other.hits['/robots.txt'] == 1
+    finally:
+        other.close()

@@ -14,5 +14,7 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
     css: false,
+    // Claude Code keeps throwaway checkouts under .claude/worktrees; their copies of the tests must not run here.
+    exclude: ['**/node_modules/**', '**/dist/**', '**/.claude/**'],
   },
 });

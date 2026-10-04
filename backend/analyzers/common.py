@@ -129,6 +129,9 @@ def element_lines(tags: Sequence['Tag'], limit: int = 8) -> str:
 
 
 # Credential formats with a distinctive shape. Used by the secret scanner and to mask anything the inspector records.
+# Responses that mean "not for anonymous visitors" rather than "broken": the page exists but was not inspected.
+AUTH_STATUSES = {401, 403, 407}
+
 CREDENTIAL_FORMATS: List[Tuple[str, Pattern[str]]] = [
     ('AWS access key ID', re.compile(r'\b(?:AKIA|ASIA)[0-9A-Z]{16}\b')),
     ('Private key', re.compile(r'-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----')),
@@ -211,14 +214,19 @@ def mask_finding(finding: Finding, values: Sequence[str]) -> Finding:
 # Everything in a source file that is not code: comments, and string literals (which may span lines). The leftmost token
 # wins, so a quote inside a comment or a comment marker inside a string is never misread. A single-line string that is
 # never closed ends at its line.
+# A regex literal is consumed whole (it stays code), so a quote or // inside it cannot open a string or a comment. It is only
+# read as a literal where an operator, bracket or ``return`` precedes the slash; ``a / b`` and ``/*`` are never matched.
+_JS_REGEX = r'(?:^|[=(,:;!&|?{}\[]|\breturn)[ \t]*/(?![/*])(?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\\n\[])+/[a-z]*'
+# A quote that is never closed on its line (JSX text such as Don't) is not a string, as in the old per-line rule.
 _JS_TOKENS = re.compile(
     r'//[^\n]*'
     r'|/\*.*?(?:\*/|\Z)'
     r'|<!--.*?(?:-->|\Z)'
     r'|`(?:\\.|[^`\\])*(?:`|\Z)'
-    r'|"(?:\\.|[^"\\\n])*"?'
-    r"|'(?:\\.|[^'\\\n])*'?",
-    re.S,
+    + '|' + _JS_REGEX
+    + r'|"(?:\\.|[^"\\\n])*"'
+    r"|'(?:\\.|[^'\\\n])*'",
+    re.S | re.M,
 )
 _PY_TOKENS = re.compile(
     r'#[^\n]*'
@@ -280,6 +288,11 @@ def tokenize(text: str, python: bool) -> Tokens:
             code.append(_blank(token))
             uncommented.append(_blank(token))
             comments.append(token)
+        elif not python and token[0] not in '\'"`':
+            # A regex literal (with the operator before it): code, kept as it is.
+            code.append(token)
+            uncommented.append(token)
+            comments.append(_blank(token))
         else:
             quote = token[:3] if python and token.startswith(("'''", '"""')) else token[0]
             closed = len(token) >= 2 * len(quote) and token.endswith(quote)

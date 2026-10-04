@@ -64,3 +64,15 @@ def test_links_the_crawl_did_not_request_are_found_but_not_verified(site):
     assert f'Found privacy policy → {site.url}/privacy (not verified: robots.txt disallows it)' in result.notes
     assert f'Found terms of service → {site.url}/terms (verified, HTTP 200)' in result.notes
     assert f'Found contact information → {site.url}/contact (not verified: page limit reached)' in result.notes
+
+
+def test_links_that_require_authentication_are_not_reported_as_broken(site):
+    site.add('/', page('<a href="/privacy">Privacy</a><a href="/terms">Terms</a>'))
+    site.add('/privacy', page('Members only'), status=403)
+    site.add('/terms', page('Terms'))
+
+    result = run_compliance_analysis(make_context(site.url + '/'))
+
+    assert [finding.title for finding in result.findings] == ['No contact information link found', 'No about page link found']
+    assert f'Found privacy policy → {site.url}/privacy (not verified: requires authentication, HTTP 403)' in result.notes
+    assert f'Found terms of service → {site.url}/terms (verified, HTTP 200)' in result.notes

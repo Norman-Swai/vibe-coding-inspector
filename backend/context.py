@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from urllib.parse import urlparse
 import time
 from concurrent.futures import Future
 from pathlib import Path
@@ -9,7 +10,7 @@ from typing import Callable, Dict, List, Optional, TypeVar
 
 from .analyzers.common import ScanError, plural, redact_secrets, truncate
 from .analyzers.repo import MAX_FILE_BYTES, RepoIndex
-from .analyzers.web import CrawlResult, FetchResult, PageFetcher, Robots, crawl, load_robots, normalize_url, require_allowed
+from .analyzers.web import CrawlResult, FetchResult, PageFetcher, Robots, crawl, load_robots, normalize_url, require_allowed, require_allowed_after_redirect
 from .schemas import ActivityEvent, ActivityKind, InspectionMode, ModuleName, RequestInfo, ScanRecord
 
 T = TypeVar('T')
@@ -126,17 +127,21 @@ class ScanContext:
 
     def robots(self) -> Optional[Robots]:
         """robots.txt of the target's origin, read once before any page is requested. Localhost mode does not use it."""
+        return self.robots_for(self.target_url)
+
+    def robots_for(self, url: str) -> Optional[Robots]:
+        """The rules governing ``url`` (one lookup per origin), for a target that redirects elsewhere."""
         if not self.is_public:
             return None
-        return self._once('robots', self._load_robots)
+        return self._once(f'robots:{urlparse(url).netloc}', lambda: self._load_robots(url))
 
-    def _load_robots(self) -> Robots:
-        robots = load_robots(self.fetcher, self.target_url, self._emit_shared)
-        if robots.parser is not None:
-            if robots.allows(self.target_url):
-                self.emit(None, ActivityKind.check, f'robots.txt allows {self.target_url}')
+    def _load_robots(self, url: str) -> Robots:
+        robots = load_robots(self.fetcher, url, self._emit_shared)
+        if robots.parser is not None and url == self.target_url:
+            if robots.allows(url):
+                self.emit(None, ActivityKind.check, f'robots.txt allows {url}')
             else:
-                self.emit(None, ActivityKind.warning, f'robots.txt disallows {self.target_url}; public read-only mode does not fetch it')
+                self.emit(None, ActivityKind.warning, f'robots.txt disallows {url}; public read-only mode does not fetch it')
         return robots
 
     def target_page(self) -> FetchResult:
@@ -144,12 +149,14 @@ class ScanContext:
         page = self.fetcher.get(self.target_url)
         if page.error:
             raise ScanError(f'Could not reach {self.target_url}: {page.error}')
+        # The page it redirected to is governed by its own origin's rules, which are read before it is analysed.
+        require_allowed_after_redirect(self.robots_for(page.url), self.target_url, normalize_url(page.url))
         return page
 
     def crawl(self) -> CrawlResult:
         return self._once(
             'crawl',
-            lambda: crawl(self.fetcher, self.target_url, self.options.max_pages, robots=self.robots(), emit=self._emit_shared),
+            lambda: crawl(self.fetcher, self.target_url, self.options.max_pages, robots=self.robots(), emit=self._emit_shared, robots_for=self.robots_for),
         )
 
     def repo(self) -> RepoIndex:

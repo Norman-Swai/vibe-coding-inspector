@@ -148,6 +148,8 @@ describe('launch form', () => {
     await screen.findByText('Repository path is not a directory: /srv/app/README.md');
     expect(repo).toHaveAttribute('aria-invalid', 'true');
     expect(repo).toHaveAccessibleDescription(/not a directory/);
+    // No live region carries the message, so the field itself takes focus and is read out with its description.
+    expect(repo).toHaveFocus();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 
     await user.type(repo, '{Backspace}');
@@ -308,7 +310,8 @@ describe('analytics', () => {
     const user = userEvent.setup();
     render(<App />);
     const log = await screen.findByRole('list', { name: 'Activity log' });
-    expect(screen.getByLabelText('Source')).toHaveValue('runtime');
+    expect(screen.getByLabelText('Source')).toHaveValue('runtime+shared');
+    expect(screen.getByRole('option', { name: 'Runtime + crawler & files' })).toBeInTheDocument();
     // The request for that page and the scan start, not /docs and not the security module's check of the same page.
     expect(within(log).getAllByRole('listitem').map((item) => item.querySelector('.break-anywhere')?.textContent)).toEqual([
       'Scan started: http://localhost:3000/ (localhost mode)',
@@ -316,6 +319,10 @@ describe('analytics', () => {
     ]);
     await user.selectOptions(screen.getByLabelText('Source'), 'all');
     expect(within(log).getAllByRole('listitem')).toHaveLength(3);
+    // Choosing a module by hand is strict: the shared crawl and requests are not that module's events.
+    await user.selectOptions(screen.getByLabelText('Source'), 'runtime');
+    expect(screen.queryByRole('option', { name: /^Runtime \+ / })).not.toBeInTheDocument();
+    expect(screen.getByText('Showing 0 of 5 events')).toBeInTheDocument();
   });
 
   it('keeps the activity filters when leaving Analytics and coming back', async () => {
@@ -397,6 +404,10 @@ describe('analytics', () => {
     const scan = await screen.findByRole('region', { name: 'Scan' });
     expect(within(scan).getByText('2')).toBeInTheDocument();
     expect(within(scan).getByText('none failed')).toBeInTheDocument();
+    const network = screen.getByRole('region', { name: 'Network' });
+    expect(within(network).getByText(/2 requests · 0 failed/)).toBeInTheDocument();
+    expect(within(network).getByTitle(/No robots.txt/)).toHaveTextContent('404');
+    expect(within(network).getByTitle(/No robots.txt/)).not.toHaveAttribute('data-tone');
   });
 
   it('counts a failed command as a command and a problem', async () => {
@@ -484,7 +495,7 @@ describe('findings view', () => {
     const log = await screen.findByRole('list', { name: 'Activity log' });
     expect(within(log).getAllByRole('listitem')).toHaveLength(1);
     expect(within(log).getByText('Response headers of http://localhost:3000/: 3 issues')).toBeInTheDocument();
-    expect(screen.getByLabelText('Source')).toHaveValue('security');
+    expect(screen.getByLabelText('Source')).toHaveValue('security+shared');
     expect(screen.getByText('Showing 1 of 5 events')).toBeInTheDocument();
   });
 

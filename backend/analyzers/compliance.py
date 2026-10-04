@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from ..schemas import ActivityKind, Finding, Location, ModuleName, Severity, Verification
-from .common import AnalyzerResult, Rule, element_line, new_finding, plural
+from .common import AUTH_STATUSES, AnalyzerResult, Rule, element_line, new_finding, plural
 from .web import Anchor, CrawlResult, FetchResult
 
 if TYPE_CHECKING:
@@ -124,7 +124,7 @@ def check_links(crawl: CrawlResult) -> Tuple[List[Finding], List[str], List[str]
     """Findings for missing and broken requirements, plus 'name → url (…)' for found and broken ones and the names of missing ones.
 
     A match is verified against the crawl: a link whose target loaded is found, one whose target failed is broken, and one
-    the crawl did not request (off-site, robots.txt, page limit) is found but marked as not verified.
+    the crawl did not request (off-site, robots.txt, page limit) or that requires authentication is found but marked as not verified.
     """
     findings: List[Finding] = []
     found: List[str] = []
@@ -135,8 +135,10 @@ def check_links(crawl: CrawlResult) -> Tuple[List[Finding], List[str], List[str]
         pages.setdefault(page.url, page)
     for requirement in REQUIREMENTS:
         anchor, page = _match(requirement, crawl, pages)
-        if anchor and page is None:
-            found.append(f'{requirement.name} → {anchor.href} (not verified: {_not_verified(crawl, anchor)})')
+        if anchor and (page is None or page.status in AUTH_STATUSES):
+            # Like the runtime module, a 401/403 is "not for anonymous visitors", not a broken page.
+            why = _not_verified(crawl, anchor) if page is None else f'requires authentication, HTTP {page.status}'
+            found.append(f'{requirement.name} → {anchor.href} (not verified: {why})')
             continue
         if anchor and page.ok:
             found.append(f'{requirement.name} → {anchor.href} (verified, HTTP {page.status})')

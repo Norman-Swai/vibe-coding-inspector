@@ -8,17 +8,7 @@ import { ViewHeader } from '../components/ViewHeader';
 import type { ActivityEvent, ScanStatusResponse } from '../contracts/finding';
 import { hrefFor } from '../hooks/useHashRoute';
 import { downloadText } from '../lib/download';
-import { formatDuration, formatTime } from '../lib/meta';
-
-/** A robots.txt lookup that answers 404 is the expected "no rules" outcome, not a failed request. */
-function isExpectedMiss(event: ActivityEvent) {
-  if (!event.request || event.request.status !== 404) return false;
-  try {
-    return new URL(event.request.url).pathname === '/robots.txt';
-  } catch {
-    return false;
-  }
-}
+import { formatDuration, formatTime, isExpectedMiss } from '../lib/meta';
 
 /** Why the command count can be 0: npm audit is the only command, and the scan records whether it could run. */
 export function npmAuditHint(scan: ScanStatusResponse) {
@@ -33,7 +23,7 @@ export function npmAuditHint(scan: ScanStatusResponse) {
 
 function ScanFacts({ scan, activity }: { scan: ScanStatusResponse; activity: ActivityEvent[] }) {
   const requests = activity.filter((event) => event.request);
-  const failedRequests = requests.filter((event) => event.request?.error || ((event.request?.status ?? 0) >= 400 && !isExpectedMiss(event))).length;
+  const failedRequests = requests.filter(({ request }) => request && (request.error || ((request.status ?? 0) >= 400 && !isExpectedMiss(request)))).length;
   const count = (kinds: string[]) => activity.filter((event) => kinds.includes(event.kind)).length;
   const duration = scan.finished_at ? new Date(scan.finished_at).getTime() - new Date(scan.created_at).getTime() : null;
   const outcome = scanOutcome(scan);

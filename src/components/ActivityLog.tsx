@@ -5,7 +5,8 @@ import { ACTIVITY_KIND_META, formatOffset, MODULE_META, MODULES, redactSecrets, 
 import { EmptyState, Panel, SegmentedControl } from './ui';
 
 export type KindFilter = 'all' | 'request' | 'check' | 'command' | 'problem';
-export type SourceFilter = 'all' | 'shared' | ModuleName;
+/** "<module>+shared" is what a trace link selects: the module's events plus the shared work (crawl, requests) behind them. */
+export type SourceFilter = 'all' | 'shared' | ModuleName | `${ModuleName}+shared`;
 
 /** Filters. Owned by the app shell so they survive leaving Analytics and coming back. */
 export interface ActivityUiState {
@@ -16,9 +17,17 @@ export interface ActivityUiState {
 
 export const EMPTY_ACTIVITY_UI: ActivityUiState = { kind: 'all', source: 'all', query: '' };
 
-/** A source filter from the route (#/analytics?source=…), or null when the value is not one. */
+/** A source filter from the route (#/analytics?source=…), or null when the value is not one. A module named there comes
+ * from a trace link, whose evidence was produced by shared work as well, so both are shown. */
 export function parseSource(value: string | null): SourceFilter | null {
-  return value === 'all' || value === 'shared' || MODULES.includes(value as ModuleName) ? (value as SourceFilter) : null;
+  if (value === 'all' || value === 'shared') return value;
+  return MODULES.includes(value as ModuleName) ? `${value as ModuleName}+shared` : null;
+}
+
+/** The module of a "<module>+shared" filter, or null for any other filter. */
+export function moduleWithShared(source: SourceFilter): ModuleName | null {
+  const module = source.endsWith('+shared') ? (source.slice(0, -'+shared'.length) as ModuleName) : null;
+  return module && MODULES.includes(module) ? module : null;
 }
 
 /** Commands are logged as "$ <command> → …"; a failed run is an error event but is still a command. */
@@ -34,11 +43,12 @@ const KIND_FILTERS: Record<KindFilter, (event: ActivityEvent) => boolean> = {
   problem: (event) => event.kind === 'warning' || event.kind === 'error',
 };
 
-/** Shared events (the HTTP client, crawler and repository index) are work done for every module, so a module's view includes them. */
 function fromSource(event: ActivityEvent, source: SourceFilter) {
   if (source === 'all') return true;
   if (source === 'shared') return event.module === null;
-  return event.module === source || event.module === null;
+  const traced = moduleWithShared(source);
+  if (traced) return event.module === traced || event.module === null;
+  return event.module === source;
 }
 
 export function sourceLabel(module: ModuleName | null) {
@@ -145,6 +155,11 @@ export function ActivityLog({
             <select value={source} onChange={(event) => onUiChange({ source: event.target.value as SourceFilter })}>
               <option value="all">All sources</option>
               <option value="shared">{SHARED_SOURCE_LABEL}</option>
+              {moduleWithShared(source) && (
+                <option value={source}>
+                  {MODULE_META[moduleWithShared(source)!].label} + {SHARED_SOURCE_LABEL.toLowerCase()}
+                </option>
+              )}
               {MODULES.map((module) => (
                 <option key={module} value={module}>
                   {MODULE_META[module].label}

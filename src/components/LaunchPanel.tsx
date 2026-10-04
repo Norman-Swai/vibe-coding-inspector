@@ -1,5 +1,5 @@
 import { Globe, Laptop, Play } from 'lucide-react';
-import { type FormEvent, useId, useRef, useState } from 'react';
+import { type FormEvent, useEffect, useId, useRef, useState } from 'react';
 import type { InspectionMode, ScanRequest } from '../contracts/finding';
 import { useSettings } from '../lib/settings';
 import { ErrorNotice, Field, Panel, SegmentedControl } from './ui';
@@ -79,6 +79,12 @@ export function LaunchPanel({
   const repoError = mode === 'localhost' ? validateRepoPath(repoPath) : null;
   const authError = submitted && !authorized ? AUTH_ERROR : null;
   const canSubmit = !targetError && !repoError && authorized && !busy && !running && !blockedReason;
+
+  // A rejection from the API is shown on its field (no live region), so the keyboard goes there and the message is read out.
+  useEffect(() => {
+    if (serverTargetError) targetRef.current?.focus();
+    else if (serverRepoError) repoRef.current?.focus();
+  }, [serverTargetError, serverRepoError]);
 
   function submit(event: FormEvent) {
     event.preventDefault();

@@ -5,6 +5,8 @@ import { installMatchMedia } from './utils';
 
 // jsdom does not implement layout APIs.
 Element.prototype.scrollIntoView ??= function scrollIntoView() {};
+// jsdom logs "not implemented" for window.scrollTo; the app scrolls to the top when the view changes.
+window.scrollTo = () => {};
 
 beforeEach(() => {
   installMatchMedia();

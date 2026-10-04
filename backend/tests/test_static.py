@@ -100,3 +100,16 @@ def test_strings_docstrings_and_comments_never_trigger_code_checks_and_todos_onl
     assert by_key[('src/app.js', todo)].evidence.snippet.splitlines() == ['L6: /* FIXME: block comment', 'L9: // TODO: line comment']
     assert by_key[('src/tool.py', unresolved)].location.line_start == 4
     assert by_key[('src/tool.py', todo)].location.line_start == 4
+
+
+def test_regex_literals_and_unclosed_quotes_do_not_hide_the_rest_of_the_line():
+    from backend.analyzers.common import tokenize
+
+    code = tokenize("const q = /['\"]/g; setInterval(tick, 1) // note\nx = a / b / c; setInterval(tock, 2)\n<p>Don't</p>; setInterval(last, 3)\n", python=False).code
+    assert code.splitlines() == [
+        "const q = /['\"]/g; setInterval(tick, 1)        ",
+        "x = a / b / c; setInterval(tock, 2)",
+        "<p>Don't</p>; setInterval(last, 3)",
+    ]
+    assert tokenize("return /\\/\\/x/.test(s); eval(s)", python=False).code == "return /\\/\\/x/.test(s); eval(s)"
+    assert tokenize("const s = 'closed'; eval(s)", python=False).code == "const s = '      '; eval(s)"

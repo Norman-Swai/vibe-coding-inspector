@@ -1,6 +1,6 @@
 import { Globe } from 'lucide-react';
-import type { ActivityEvent } from '../contracts/finding';
-import { formatBytes, formatDuration, redactSecrets } from '../lib/meta';
+import type { ActivityEvent, RequestInfo } from '../contracts/finding';
+import { formatBytes, formatDuration, isExpectedMiss, redactSecrets } from '../lib/meta';
 import { EmptyState, Panel } from './ui';
 
 function shortUrl(url: string, base: string) {
@@ -14,17 +14,17 @@ function shortUrl(url: string, base: string) {
   return redactSecrets(short);
 }
 
-function statusTone(status?: number | null, error?: string | null) {
-  if (error || status == null) return 'danger';
-  if (status >= 500) return 'danger';
-  if (status >= 400) return 'warning';
+function statusTone(request: RequestInfo) {
+  if (request.error || request.status == null) return 'danger';
+  if (request.status >= 500) return 'danger';
+  if (request.status >= 400) return isExpectedMiss(request) ? undefined : 'warning';
   return 'success';
 }
 
 /** Every HTTP request the scan sent, from the activity log. Rows become cards on narrow screens. */
 export function NetworkTable({ events, baseUrl }: { events: ActivityEvent[]; baseUrl: string }) {
   const requests = events.filter((event) => event.request).map((event) => event.request!);
-  const failed = requests.filter((request) => request.error || (request.status ?? 0) >= 400).length;
+  const failed = requests.filter((request) => request.error || ((request.status ?? 0) >= 400 && !isExpectedMiss(request))).length;
   const totalBytes = requests.reduce((sum, request) => sum + (request.bytes ?? 0), 0);
   const average = requests.length ? Math.round(requests.reduce((sum, request) => sum + (request.duration_ms ?? 0), 0) / requests.length) : 0;
 
@@ -53,7 +53,7 @@ export function NetworkTable({ events, baseUrl }: { events: ActivityEvent[]; bas
                 {requests.map((request, index) => (
                   <tr key={`${request.url}-${index}`}>
                     <td data-label="Status">
-                      <span className="badge" data-tone={statusTone(request.status, request.error)}>
+                      <span className="badge" data-tone={statusTone(request)} title={isExpectedMiss(request) ? 'No robots.txt: every path is allowed. This is not a failure.' : undefined}>
                         {request.error ? 'failed' : request.status}
                       </span>
                     </td>

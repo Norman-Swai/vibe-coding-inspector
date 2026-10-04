@@ -334,7 +334,19 @@ def require_allowed(robots: Optional[Robots], url: str) -> None:
         raise ScanError(f'robots.txt disallows {url}; public read-only mode does not fetch it')
 
 
-def crawl(fetcher: PageFetcher, start_url: str, max_pages: int, robots: Optional[Robots] = None, emit: Emit = _no_emit) -> CrawlResult:
+def require_allowed_after_redirect(robots: Optional[Robots], start: str, url: str) -> None:
+    """A redirect is followed before the destination's rules can be read, so a disallowed destination is dropped, not analysed."""
+    if robots is not None and url != start and not robots.allows(url):
+        raise ScanError(f'robots.txt disallows {url}, which {start} redirected to; public read-only mode does not analyse it')
+
+
+# Returns the robots.txt rules governing a URL (public mode); the scan context memoises one lookup per origin.
+RobotsFor = Callable[[str], Robots]
+
+
+def crawl(
+    fetcher: PageFetcher, start_url: str, max_pages: int, robots: Optional[Robots] = None, emit: Emit = _no_emit, robots_for: Optional[RobotsFor] = None
+) -> CrawlResult:
     """Breadth-first, same-origin crawl. Each level is fetched concurrently; at most ``max_pages`` URLs are requested.
 
     ``robots`` (public mode) must already hold the rules of the start URL's origin, so nothing is requested before they are read.
@@ -355,7 +367,8 @@ def crawl(fetcher: PageFetcher, start_url: str, max_pages: int, robots: Optional
     robots_skipped: List[str] = []
     if robots is not None and origin != robots.origin:
         # The target redirected to another origin, whose own robots.txt governs the rest of the crawl.
-        robots = load_robots(fetcher, first.url, emit)
+        robots = robots_for(first.url) if robots_for else load_robots(fetcher, first.url, emit)
+    require_allowed_after_redirect(robots, start, normalize_url(first.url))
 
     def collect(page: FetchResult) -> List[str]:
         if not (page.ok and page.is_html and urlparse(page.url).netloc == origin):
