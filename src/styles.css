@@ -1671,8 +1671,6 @@ textarea:focus-visible {
     min-height: var(--control-h);
   }
 
-  .link-button,
-  a.badge,
   .scan-chip,
   .brand,
   .viewnav a {
@@ -1681,16 +1679,24 @@ textarea:focus-visible {
     min-height: 2.75rem;
   }
 
+  /* Links inside sentences and badge rows keep their line box; a transparent extension carries the 44px hit area. */
+  .link-button,
+  a.badge {
+    position: relative;
+  }
+
+  .link-button::before,
+  a.badge::before {
+    content: '';
+    position: absolute;
+    inset: -0.75rem 0;
+  }
+
   /* Summaries grow through padding so they keep their disclosure marker. */
   .module-notes summary,
   .activity-output summary {
     min-height: 2.75rem;
     padding-block: 0.75rem;
-  }
-
-  /* The CWE link grows alone; the badges beside it keep their size. */
-  .tag-row {
-    align-items: center;
   }
 }
 
@@ -1821,10 +1827,8 @@ textarea:focus-visible {
     margin-top: 0.2rem;
   }
 
+  /* The whole step wraps: a tooltip is no fallback on a touch screen. */
   .monitor-now-text {
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
     white-space: normal;
     overflow-wrap: anywhere;
   }
@@ -2081,6 +2085,11 @@ textarea:focus-visible {
   .print-error {
     color: #b00;
     font-weight: 600;
+  }
+
+  .print-command {
+    margin: 0.5rem 0 1rem;
+    break-inside: avoid;
   }
 
   .print-finding {

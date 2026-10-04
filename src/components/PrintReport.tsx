@@ -1,6 +1,7 @@
 import { useId } from 'react';
-import type { Finding, FixReviewDecision, InspectionMode, ReviewDecision, ScanStatusResponse } from '../contracts/finding';
+import type { ActivityEvent, Finding, FixReviewDecision, InspectionMode, ReviewDecision, ScanStatusResponse } from '../contracts/finding';
 import { compareSeverity, formatDuration, formatLocation, formatTime, MODULE_META, MODULE_STATE_LABEL, MODULES, redactSecrets, SEVERITIES, SEVERITY_META } from '../lib/meta';
+import { isCommand, sourceLabel } from './ActivityLog';
 
 const MODE_LABEL: Record<InspectionMode, string> = { localhost: 'Authorised localhost', 'public-readonly': 'Public read-only' };
 const REVIEW_LABEL: Record<ReviewDecision, string> = { pending: 'Pending', confirmed: 'Confirmed', rejected: 'Rejected', escalated: 'Escalated' };
@@ -13,13 +14,26 @@ function decisionText(label: string, reviewer?: string | null, timestamp?: strin
 }
 
 /**
- * The report that Print / PDF prints, built from the scan and findings already in the client (the same content as
- * the Markdown export). It carries the hidden attribute on screen; the print stylesheet shows it and hides all else.
+ * The report that Print / PDF prints, built from the scan, activity and findings already in the client: the same
+ * sections as the Markdown export. It carries the hidden attribute on screen; the print stylesheet shows it and hides all else.
  */
-export function PrintReport({ scan, findings }: { scan: ScanStatusResponse; findings: Finding[] }) {
+export function PrintReport({
+  scan,
+  findings,
+  activity,
+  activityDropped,
+}: {
+  scan: ScanStatusResponse;
+  findings: Finding[];
+  activity: ActivityEvent[];
+  activityDropped: number;
+}) {
   const titleId = useId();
   const sorted = [...findings].sort((a, b) => compareSeverity(a.severity, b.severity));
   const bySeverity = SEVERITIES.map((severity) => `${SEVERITY_META[severity].label} ${findings.filter((finding) => finding.severity === severity).length}`).join(', ');
+  const requests = activity.filter((event) => event.request).length;
+  const checks = activity.filter((event) => event.kind === 'check');
+  const commands = activity.filter(isCommand);
 
   return (
     <section className="print-report" aria-labelledby={titleId} hidden>
@@ -97,6 +111,54 @@ export function PrintReport({ scan, findings }: { scan: ScanStatusResponse; find
         </tbody>
       </table>
 
+      <h2>What was done</h2>
+      <dl className="print-facts">
+        <div>
+          <dt>HTTP requests sent</dt>
+          <dd>{requests}</dd>
+        </div>
+        <div>
+          <dt>Checks evaluated</dt>
+          <dd>{checks.length}</dd>
+        </div>
+        <div>
+          <dt>Commands run</dt>
+          <dd>{commands.length}</dd>
+        </div>
+        {activityDropped > 0 && (
+          <div>
+            <dt>Not recorded</dt>
+            <dd>{activityDropped} activity events (cap reached)</dd>
+          </div>
+        )}
+      </dl>
+      {commands.map((event) => (
+        <div key={event.seq} className="print-command">
+          <p>
+            <strong>{redactSecrets(event.message)}</strong>
+          </p>
+          <pre className="print-excerpt">{redactSecrets(event.output || '(no output)')}</pre>
+        </div>
+      ))}
+      {checks.length > 0 && (
+        <table className="print-table">
+          <thead>
+            <tr>
+              <th scope="col">Module</th>
+              <th scope="col">Check</th>
+            </tr>
+          </thead>
+          <tbody>
+            {checks.map((event) => (
+              <tr key={event.seq}>
+                <td>{sourceLabel(event.module)}</td>
+                <td>{redactSecrets(event.message)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
       <h2>Findings</h2>
       {sorted.length === 0 && <p>No findings were reported by the modules that completed.</p>}
       {sorted.map((finding, index) => {
@@ -119,6 +181,10 @@ export function PrintReport({ scan, findings }: { scan: ScanStatusResponse; find
               <div>
                 <dt>Module</dt>
                 <dd>{finding.source_modules.map((module) => MODULE_META[module].label).join(', ')}</dd>
+              </div>
+              <div>
+                <dt>Category</dt>
+                <dd>{MODULE_META[finding.category].label}</dd>
               </div>
               <div>
                 <dt>Location</dt>

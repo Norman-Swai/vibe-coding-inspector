@@ -1,12 +1,22 @@
 import { Eye, EyeOff, FileDown, FileJson, Printer } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { apiClient, type ReportFormat } from '../api/client';
-import type { Finding, ScanStatusResponse } from '../contracts/finding';
+import type { ActivityEvent, Finding, ScanStatusResponse } from '../contracts/finding';
 import { downloadText } from '../lib/download';
 import { PrintReport } from './PrintReport';
 import { ErrorNotice, Panel } from './ui';
 
-export function ReportPanel({ scan, findings }: { scan: ScanStatusResponse | null; findings: Finding[] }) {
+export function ReportPanel({
+  scan,
+  findings,
+  activity = [],
+  activityDropped = 0,
+}: {
+  scan: ScanStatusResponse | null;
+  findings: Finding[];
+  activity?: ActivityEvent[];
+  activityDropped?: number;
+}) {
   const [preview, setPreview] = useState<string | null>(null);
   const [showPreview, setShowPreview] = useState(false);
   const [busy, setBusy] = useState<ReportFormat | null>(null);
@@ -77,7 +87,7 @@ export function ReportPanel({ scan, findings }: { scan: ScanStatusResponse | nul
           {preview ?? 'Loading…'}
         </pre>
       )}
-      {scan && <PrintReport scan={scan} findings={findings} />}
+      {scan && <PrintReport scan={scan} findings={findings} activity={activity} activityDropped={activityDropped} />}
     </Panel>
   );
 }

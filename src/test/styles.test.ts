@@ -73,8 +73,14 @@ describe('touch screens', () => {
 
   it('give every text-sized control a 44px tap target', () => {
     expect(declarations('.segmented-option span', coarse)['min-height']).toBe('var(--control-h)');
-    for (const selector of ['.link-button', 'a.badge', '.scan-chip', '.brand', '.viewnav a', '.module-notes summary', '.activity-output summary']) {
+    for (const selector of ['.scan-chip', '.brand', '.viewnav a', '.module-notes summary', '.activity-output summary']) {
       expect(declarations(selector, coarse)['min-height'], selector).toBe('2.75rem');
+    }
+    // Inline links keep their line box (a sentence or a badge row must not grow); the hit area is extended invisibly.
+    for (const selector of ['.link-button', 'a.badge']) {
+      expect(declarations(selector, coarse)['min-height'], selector).toBeUndefined();
+      expect(declarations(selector, coarse).position, selector).toBe('relative');
+      expect(declarations(`${selector}::before`, coarse), selector).toMatchObject({ position: 'absolute', inset: '-0.75rem 0' });
     }
   });
 
@@ -100,8 +106,10 @@ describe('phones', () => {
     expect(declarations('.nav-count', phone).left).toBe('calc(50% + 0.75rem)');
   });
 
-  it('wrap the current scan step instead of cutting it off', () => {
-    expect(declarations('.monitor-now-text', phone)['white-space']).toBe('normal');
+  it('wrap the current scan step fully instead of cutting it off', () => {
+    const step = declarations('.monitor-now-text', phone);
+    expect(step['white-space']).toBe('normal');
+    expect(step['-webkit-line-clamp']).toBeUndefined();
   });
 });
 

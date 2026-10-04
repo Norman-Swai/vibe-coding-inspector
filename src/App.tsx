@@ -267,7 +267,16 @@ function Workspace() {
             />
           )}
           {view === 'findings' && (
-            <FindingsView scan={scan} findings={findings} error={error} ui={findingsUi} onUiChange={updateFindingsUi} onFindingUpdated={replaceFinding} />
+            <FindingsView
+              scan={scan}
+              findings={findings}
+              activity={activity}
+              activityDropped={activityDropped}
+              error={error}
+              ui={findingsUi}
+              onUiChange={updateFindingsUi}
+              onFindingUpdated={replaceFinding}
+            />
           )}
           </ViewErrorBoundary>
         </main>

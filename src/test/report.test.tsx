@@ -2,7 +2,7 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { ReportPanel } from '../components/ReportPanel';
-import { makeFinding, makeScan } from './utils';
+import { makeEvent, makeFinding, makeScan } from './utils';
 
 const FINDINGS = [
   makeFinding({ id: 'a', title: 'Form controls have no accessible label', severity: 'medium' }),
@@ -33,9 +33,18 @@ const SCAN = makeScan({
   },
 });
 
+const ACTIVITY = [
+  makeEvent({ seq: 1, message: 'Scan started: http://localhost:3000/ (localhost mode)' }),
+  makeEvent({ seq: 2, kind: 'request', message: 'GET http://localhost:3000/ -> 200 OK text/html (5 ms)', request: { method: 'GET', url: 'http://localhost:3000/', status: 200 } }),
+  makeEvent({ seq: 3, kind: 'request', message: 'GET http://localhost:3000/docs -> 404 Not Found (2 ms)', request: { method: 'GET', url: 'http://localhost:3000/docs', status: 404 } }),
+  makeEvent({ seq: 4, module: 'runtime', kind: 'check', message: 'Inspected http://localhost:3000/: 1 issue' }),
+  makeEvent({ seq: 5, module: 'security', kind: 'check', message: 'Response headers of http://localhost:3000/: 3 issues' }),
+  makeEvent({ seq: 6, module: 'security', kind: 'command', message: '$ npm audit --json → exit 0, 0 vulnerable packages', output: 'vulnerabilities: {"total": 0}\ntoken=AKIA' + 'QWERTYUIOPASDFGH' }),
+];
+
 describe('print report', () => {
-  it('is hidden on screen and holds the scan header, every coverage row and every finding', () => {
-    const { container } = render(<ReportPanel scan={SCAN} findings={FINDINGS} />);
+  it('is hidden on screen and holds the scan header, every coverage row, what was done and every finding', () => {
+    const { container } = render(<ReportPanel scan={SCAN} findings={FINDINGS} activity={ACTIVITY} activityDropped={3} />);
     const report = container.querySelector<HTMLElement>('.print-report') as HTMLElement;
     expect(report).not.toBeVisible();
     const text = (element: HTMLElement) => element.textContent?.replace(/\s+/g, ' ').trim();
@@ -48,13 +57,33 @@ describe('print report', () => {
     expect(within(report).getByText('2 (Critical 0, High 1, Medium 1, Low 0, Info 0)')).toBeInTheDocument();
 
     const cells = (row: HTMLElement) => [...row.querySelectorAll('th, td')].map((cell) => text(cell as HTMLElement)).join(' ');
-    const [header, ...rows] = within(report).getAllByRole('row', { hidden: true });
+    const [coverage, done] = within(report).getAllByRole('table', { hidden: true });
+    const [header, ...rows] = within(coverage).getAllByRole('row', { hidden: true });
     expect(cells(header)).toBe('Module State Scanned Duration Notes');
     expect(rows.map(cells)).toEqual([
       'Runtime Done 3 URLs requested, 2 HTML pages inspected 1.5 s JavaScript is not executed',
       'Static code Failed — — Error: Repository path does not exist',
       'Security Done 1 page 12 ms —',
       'Compliance Skipped — — Public mode: no repository',
+    ]);
+
+    // What was done: the same counts, commands (output included, secrets masked) and checks as the Markdown report.
+    const whatWasDone = within(report).getByRole('heading', { level: 2, name: 'What was done', hidden: true });
+    const summary = whatWasDone.nextElementSibling as HTMLElement;
+    expect(within(summary).getAllByRole('term', { hidden: true }).map((term) => `${text(term)}: ${text(term.nextElementSibling as HTMLElement)}`)).toEqual([
+      'HTTP requests sent: 2',
+      'Checks evaluated: 2',
+      'Commands run: 1',
+      'Not recorded: 3 activity events (cap reached)',
+    ]);
+    const command = report.querySelector('.print-command') as HTMLElement;
+    expect(text(command.querySelector('strong') as HTMLElement)).toBe('$ npm audit --json → exit 0, 0 vulnerable packages');
+    expect(command.querySelector('pre')?.textContent).toContain('vulnerabilities: {"total": 0}');
+    expect(command.querySelector('pre')?.textContent).not.toContain('QWERTYUIOP');
+    expect(within(done).getAllByRole('row', { hidden: true }).map(cells)).toEqual([
+      'Module Check',
+      'Runtime Inspected http://localhost:3000/: 1 issue',
+      'Security Response headers of http://localhost:3000/: 3 issues',
     ]);
 
     // Most severe first, numbered, with every artifact and decision a reviewer would want on paper.
@@ -69,6 +98,7 @@ describe('print report', () => {
       'Severity: High',
       'Verification: Hypothesis — a person must confirm it',
       'Module: Security',
+      'Category: Security',
       'Location: src/config.js:4',
       'Check: Secret-shaped literals.',
       'Source: src/config.js scanned for secret-shaped literals',
@@ -89,6 +119,7 @@ describe('print report', () => {
       'Severity: Medium',
       'Verification: Observed directly',
       'Module: Runtime',
+      'Category: Runtime',
       'Location: / · line 11',
       'Element: <input name="phone">',
       'Check: Each control needs a label.',

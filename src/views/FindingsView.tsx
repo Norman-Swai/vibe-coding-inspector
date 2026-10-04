@@ -3,7 +3,7 @@ import { FindingsPanel, type FindingsUiState } from '../components/FindingsPanel
 import { ReportPanel } from '../components/ReportPanel';
 import { EmptyState, ErrorNotice, Panel } from '../components/ui';
 import { ViewHeader } from '../components/ViewHeader';
-import type { Finding, ScanStatusResponse } from '../contracts/finding';
+import type { ActivityEvent, Finding, ScanStatusResponse } from '../contracts/finding';
 import { hrefFor } from '../hooks/useHashRoute';
 import { listOf, MODULE_META, MODULES } from '../lib/meta';
 
@@ -59,6 +59,8 @@ function FindingsSummary({ scan, findings }: { scan: ScanStatusResponse; finding
 export function FindingsView({
   scan,
   findings,
+  activity,
+  activityDropped,
   error,
   ui,
   onUiChange,
@@ -66,6 +68,8 @@ export function FindingsView({
 }: {
   scan: ScanStatusResponse | null;
   findings: Finding[];
+  activity: ActivityEvent[];
+  activityDropped: number;
   error: string | null;
   ui: FindingsUiState;
   onUiChange: (patch: Partial<FindingsUiState>) => void;
@@ -94,7 +98,7 @@ export function FindingsView({
         <>
           <FindingsSummary scan={scan} findings={findings} />
           <FindingsPanel scan={scan} findings={findings} ui={ui} onUiChange={onUiChange} onFindingUpdated={onFindingUpdated} />
-          <ReportPanel scan={scan} findings={findings} />
+          <ReportPanel scan={scan} findings={findings} activity={activity} activityDropped={activityDropped} />
         </>
       )}
     </>

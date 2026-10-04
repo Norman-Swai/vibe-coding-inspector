@@ -27,7 +27,8 @@ become a bottom tab bar.
   masks secrets in the UI and in exports
 - supports human review: confirm / reject / escalate (reject and escalate require a reason, enforced by the API) and a
   fix-approval step that is only available for confirmed findings and never changes code automatically
-- exports Markdown and JSON reports with coverage, evidence and review decisions; **Print / PDF** prints the full report
+- exports Markdown and JSON reports with coverage, evidence and review decisions; **Print / PDF** prints the same report
+  formatted for paper (coverage, what was done, every finding with its artifacts and decisions)
 
 ## What each module checks
 
