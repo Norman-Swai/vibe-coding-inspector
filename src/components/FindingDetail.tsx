@@ -1,0 +1,182 @@
+import { ArrowLeft, Check, ExternalLink, Flag, X } from 'lucide-react';
+import { useState } from 'react';
+import { apiClient } from '../api/client';
+import type { Finding, FixReviewDecision, ReviewDecision } from '../contracts/finding';
+import { formatLocation, formatTime, MODULE_META, redactSecrets } from '../lib/meta';
+import { useSettings } from '../lib/settings';
+import { ErrorNotice, Field, SeverityBadge, Tag } from './ui';
+
+const REVIEW_LABEL: Record<ReviewDecision, string> = { pending: 'Not reviewed yet', confirmed: 'Confirmed', rejected: 'Rejected', escalated: 'Escalated' };
+const REVIEW_TONE = { pending: 'neutral', confirmed: 'success', rejected: 'danger', escalated: 'warning' } as const;
+const FIX_LABEL: Record<FixReviewDecision, string> = { pending: 'No decision', approved: 'Approved', declined: 'Declined' };
+
+function cweUrl(cwe?: string | null) {
+  const match = /^CWE-(\d+)$/.exec(cwe ?? '');
+  return match ? `https://cwe.mitre.org/data/definitions/${match[1]}.html` : null;
+}
+
+export function FindingDetail({
+  finding,
+  baseUrl,
+  onUpdated,
+  onBack,
+}: {
+  finding: Finding;
+  baseUrl?: string;
+  onUpdated: (finding: Finding) => void;
+  onBack?: () => void;
+}) {
+  const { settings, open } = useSettings();
+  const [reason, setReason] = useState('');
+  const [pending, setPending] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const reviewer = settings.reviewer.trim() || undefined;
+  const { evidence, review } = finding;
+  const fixDecision = finding.fix_review?.decision ?? 'pending';
+  const cwe = cweUrl(finding.cwe_id);
+
+  async function run(key: string, action: () => Promise<Finding>) {
+    setPending(key);
+    setError(null);
+    try {
+      onUpdated(await action());
+      setReason('');
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : 'The update failed.');
+    } finally {
+      setPending(null);
+    }
+  }
+
+  const decide = (decision: ReviewDecision) =>
+    run(decision, () => apiClient.updateReview(finding.id, { decision, reason: reason.trim() || undefined, reviewer, timestamp: new Date().toISOString() }));
+  const decideFix = (decision: FixReviewDecision) =>
+    run(`fix-${decision}`, () => apiClient.updateFixReview(finding.id, { decision, reviewer, timestamp: new Date().toISOString() }));
+
+  return (
+    <article className="finding-detail" aria-labelledby={`finding-${finding.id}`}>
+      {onBack && (
+        <button type="button" className="button button-ghost back-button" onClick={onBack}>
+          <ArrowLeft size={16} aria-hidden="true" /> All findings
+        </button>
+      )}
+      <header className="detail-header">
+        <div className="tag-row">
+          <SeverityBadge severity={finding.severity} />
+          <Tag tone={finding.verification === 'confirmed' ? 'success' : 'warning'} title={finding.verification === 'confirmed' ? 'Directly observed' : 'Pattern match — a person must confirm it'}>
+            {finding.verification === 'confirmed' ? 'Observed' : 'Hypothesis'}
+          </Tag>
+          {finding.source_modules.map((module) => (
+            <Tag key={module}>{MODULE_META[module].label}</Tag>
+          ))}
+          {cwe && (
+            <a className="badge" data-tone="neutral" href={cwe} target="_blank" rel="noreferrer noopener">
+              {finding.cwe_id} <ExternalLink size={12} aria-hidden="true" />
+            </a>
+          )}
+        </div>
+        <h3 id={`finding-${finding.id}`}>{finding.title}</h3>
+      </header>
+
+      <section className="detail-section" aria-label="Evidence">
+        <h4>Evidence</h4>
+        <dl className="facts">
+          <div>
+            <dt>Location</dt>
+            <dd className="break-anywhere">{formatLocation(finding.location, baseUrl)}</dd>
+          </div>
+          {finding.location.element && (
+            <div>
+              <dt>Element</dt>
+              <dd className="break-anywhere">{finding.location.element}</dd>
+            </div>
+          )}
+          {evidence.check && (
+            <div>
+              <dt>Check</dt>
+              <dd>{evidence.check}</dd>
+            </div>
+          )}
+          {evidence.captured_output && (
+            <div>
+              <dt>Source</dt>
+              <dd className="break-anywhere">{redactSecrets(evidence.captured_output)}</dd>
+            </div>
+          )}
+          {evidence.occurrences > 1 && (
+            <div>
+              <dt>Occurrences</dt>
+              <dd>{evidence.occurrences}</dd>
+            </div>
+          )}
+        </dl>
+        {/* Captured content is untrusted: React renders it as text, never as HTML. */}
+        <pre className="evidence" tabIndex={0} aria-label="Evidence excerpt">
+          {redactSecrets(evidence.snippet || '(no excerpt captured)')}
+        </pre>
+      </section>
+
+      <section className="detail-section">
+        <h4>What it means</h4>
+        <p>{finding.description_plain}</p>
+        <p>
+          <strong>Impact:</strong> {finding.impact_plain}
+        </p>
+      </section>
+
+      <section className="detail-section">
+        <h4>Review</h4>
+        <p className="review-status">
+          <Tag tone={REVIEW_TONE[review.decision]}>{REVIEW_LABEL[review.decision]}</Tag>
+          {review.decision !== 'pending' && (
+            <span className="muted small">
+              {review.reviewer ? `by ${review.reviewer}` : ''} {formatTime(review.timestamp)}
+              {review.reason ? ` — “${review.reason}”` : ''}
+            </span>
+          )}
+        </p>
+        <Field label="Reason" hint="Required to reject or escalate.">
+          {(props) => <textarea {...props} rows={2} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Why is this a false positive, or who should look at it?" />}
+        </Field>
+        <div className="button-row">
+          <button type="button" className="button" data-tone="success" disabled={!!pending} onClick={() => decide('confirmed')}>
+            <Check size={16} aria-hidden="true" /> Confirm
+          </button>
+          <button type="button" className="button" data-tone="danger" disabled={!!pending || !reason.trim()} onClick={() => decide('rejected')}>
+            <X size={16} aria-hidden="true" /> Reject
+          </button>
+          <button type="button" className="button" data-tone="warning" disabled={!!pending || !reason.trim()} onClick={() => decide('escalated')}>
+            <Flag size={16} aria-hidden="true" /> Escalate
+          </button>
+        </div>
+        <p className="muted small">
+          Reviewing as <strong>{reviewer ?? 'anonymous'}</strong> ·{' '}
+          <button type="button" className="link-button" onClick={() => open('review')}>
+            {reviewer ? 'Change' : 'Set your name'}
+          </button>
+        </p>
+      </section>
+
+      {finding.fix_suggestion && (
+        <section className="detail-section">
+          <h4>Suggested fix</h4>
+          <p>{finding.fix_suggestion.summary}</p>
+          {finding.fix_suggestion.diff && <pre className="evidence">{finding.fix_suggestion.diff}</pre>}
+          <p className="review-status">
+            <span className="muted small">Fix decision:</span> <Tag tone={fixDecision === 'approved' ? 'success' : fixDecision === 'declined' ? 'danger' : 'neutral'}>{FIX_LABEL[fixDecision]}</Tag>
+          </p>
+          <div className="button-row">
+            <button type="button" className="button" disabled={!!pending || review.decision !== 'confirmed'} onClick={() => decideFix('approved')}>
+              Approve fix
+            </button>
+            <button type="button" className="button button-ghost" disabled={!!pending} onClick={() => decideFix('declined')}>
+              Decline fix
+            </button>
+          </div>
+          <p className="muted small">{review.decision === 'confirmed' ? 'Approving records your decision; nothing is changed in the code automatically.' : 'Confirm the finding before approving a fix.'}</p>
+        </section>
+      )}
+      {error && <ErrorNotice>{error}</ErrorNotice>}
+    </article>
+  );
+}

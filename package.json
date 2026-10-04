@@ -1,20 +1,19 @@
 {
   "name": "vibe-coding-inspector",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "lucide-react": "^0.542.0",
-    "recharts": "^2.15.4",
     "react": "^19.1.1",
-    "react-dom": "^19.1.1",
-    "react-router-dom": "^7.18.4"
+    "react-dom": "^19.1.1"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.9.1",
