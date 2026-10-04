@@ -59,12 +59,73 @@ def test_secret_scan_reports_every_real_secret_masked_and_skips_placeholders(tmp
     assert [(f.location.file, f.location.line_start, f.title) for f in findings] == [
         ('src/config.js', 1, 'AWS access key ID in source code'),
         ('src/config.js', 2, 'Possible secret assigned to "apiKey" in source code'),
-        # Name-based guesses are skipped in test files, but a real credential format is still reported there.
-        ('tests/fixtures.js', 2, 'AWS access key ID in source code'),
+        # Name-based guesses are skipped in test files; a real credential format is still reported there, labelled as a fixture.
+        ('tests/fixtures.js', 2, 'AWS access key ID in test fixture'),
     ]
     assert findings[0].severity.value == 'critical' and findings[0].verification.value == 'confirmed'
     assert aws_key not in findings[0].evidence.snippet
     assert findings[0].evidence.snippet.startswith('L1: const aws = "AKI••••••')
+    assert findings[2].severity.value == 'low' and findings[2].verification.value == 'hypothesis'
+    assert 'test/fixture path' in findings[2].evidence.captured_output
+
+
+def test_sequential_dummies_are_placeholders_even_in_provider_formats(tmp_path):
+    dummy = 'AIza' + 'SyA1234567890abcdefghijklmnopqrstuv'
+    real = 'AIza' + 'SyD9kQ2xV7mN4pL8wR3tY6uB1cE5fG0hJ2k'
+    write_files(tmp_path, {'src/test/views.test.tsx': f'const key = "{dummy}";\n', 'src/config.ts': f'const a = "{dummy}";\nconst b = "{real}";\n'})
+
+    findings = scan_secrets(RepoIndex(tmp_path))
+
+    assert [(f.location.file, f.location.line_start, f.title) for f in findings] == [('src/config.ts', 2, 'Google API key in source code')]
+
+
+def test_two_secrets_on_one_line_are_both_reported_and_both_masked(tmp_path):
+    aws_key = 'AKIA' + 'QWERTYUIOPASDFGH'
+    write_files(tmp_path, {'src/app.js': f"const aws = '{aws_key}'; const password = 'hunter2hunter2';\n"})
+    found = []
+
+    findings = scan_secrets(RepoIndex(tmp_path), found)
+
+    assert titles(findings) == ['AWS access key ID in source code', 'Possible secret assigned to "password" in source code']
+    assert found == [aws_key, 'hunter2hunter2']
+    for finding in findings:
+        assert aws_key not in finding.evidence.snippet and 'hunter2hunter2' not in finding.evidence.snippet
+    assert findings[0].evidence.snippet == "L1: const aws = 'AKI•••••• [20 chars]'; const password = 'hun•••••• [14 chars]';"
+
+
+def test_tls_rule_sees_the_quoted_environment_switch_but_not_comments_or_comparisons(tmp_path):
+    write_files(
+        tmp_path,
+        {
+            'a.js': "process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';\n",
+            'b.ts': 'process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";\n',
+            'c.mjs': 'process.env.NODE_TLS_REJECT_UNAUTHORIZED = 0;\n',
+            'd.py': 'os.environ["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"\n',
+            'e.js': "// process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'\nif (process.env.NODE_TLS_REJECT_UNAUTHORIZED == '0') warn();\n",
+            'f.js': 'const agent = new https.Agent({ rejectUnauthorized: false });\n',
+        },
+    )
+
+    tls = [f for f in scan_sinks(RepoIndex(tmp_path)) if f.title == 'TLS certificate verification disabled']
+
+    assert sorted(f.location.file for f in tls) == ['a.js', 'b.ts', 'c.mjs', 'd.py', 'f.js']
+    assert all(f.location.line_start == 1 for f in tls)
+
+
+def test_sinks_ignore_multi_line_strings_docstrings_and_block_comments(tmp_path):
+    write_files(
+        tmp_path,
+        {
+            'app.js': 'const help = `\n  never call eval(x)\n  or set el.innerHTML = y\n`;\n/* eval(inComment)\n   el.innerHTML = z */\nconst r = eval(real);\n',
+            'tool.py': '"""Never use eval(x), shell=True or pickle.loads(x).\n"""\nimport subprocess\nsubprocess.run(cmd, shell=True)  # eval(no)\n',
+        },
+    )
+
+    findings = {(f.title, f.location.file): f for f in scan_sinks(RepoIndex(tmp_path))}
+
+    assert set(findings) == {('Dynamic code execution with eval()', 'app.js'), ('Shell command run with shell=True', 'tool.py')}
+    assert findings[('Dynamic code execution with eval()', 'app.js')].evidence.snippet == 'L7: const r = eval(real);'
+    assert findings[('Shell command run with shell=True', 'tool.py')].location.line_start == 4
 
 
 def test_html_sinks_ignore_constants_comments_and_sanitised_values(tmp_path):

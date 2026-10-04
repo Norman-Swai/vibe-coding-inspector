@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query
@@ -19,6 +21,7 @@ from .schemas import (
     Finding,
     InspectionMode,
     ModuleName,
+    ModuleState,
     ReviewDecision,
     ReviewState,
     ScanRecord,
@@ -100,10 +103,16 @@ def get_activity(scan_id: str, since: int = Query(0, ge=0, description='Return e
         raise HTTPException(status_code=404, detail='Scan not found') from exc
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 @app.patch('/api/findings/{finding_id}/review', response_model=Finding)
 def patch_review(finding_id: str, review: ReviewState) -> Finding:
     if review.decision in {ReviewDecision.rejected, ReviewDecision.escalated} and not (review.reason or '').strip():
         raise HTTPException(status_code=400, detail='Rejecting or escalating a finding requires a reason.')
+    # The server records when a decision was made; a client-supplied timestamp is ignored.
+    review = review.model_copy(update={'timestamp': _now()})
 
     def updater(finding: Finding) -> Finding:
         update: dict = {'review': review}
@@ -120,6 +129,8 @@ def patch_review(finding_id: str, review: ReviewState) -> Finding:
 
 @app.patch('/api/findings/{finding_id}/fix-review', response_model=Finding)
 def patch_fix_review(finding_id: str, fix_review: FixReviewState) -> Finding:
+    fix_review = fix_review.model_copy(update={'timestamp': _now()})
+
     def updater(finding: Finding) -> Finding:
         if finding.review.decision != ReviewDecision.confirmed and fix_review.decision == FixReviewDecision.approved:
             raise HTTPException(status_code=400, detail='Fix approval requires a confirmed finding.')
@@ -150,27 +161,46 @@ def _fence(text: str) -> str:
     return f'{fence}text\n{text}\n{fence}'
 
 
+def _inline(text: str) -> str:
+    """Plain text for one Markdown line: HTML is escaped and line breaks collapsed, so captured or typed text cannot add markup or headings."""
+    return ' '.join(text.splitlines()).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
+def _code(text: str) -> str:
+    """An inline code span with more backticks than any run inside the value, so site-derived text cannot end it early."""
+    longest = max((len(run) for run in re.findall(r'`+', text)), default=0)
+    ticks = '`' * (longest + 1)
+    pad = ' ' if longest else ''
+    return f'{ticks}{pad}{" ".join(text.splitlines())}{pad}{ticks}'
+
+
 def _location(finding: Finding) -> str:
     location = finding.location
     if location.file:
         lines = f':{location.line_start}' if location.line_start else ''
-        return f'{location.file}{lines}'
+        return _code(f'{location.file}{lines}')
     if location.url:
         detail = f' (line {location.line_start})' if location.line_start else ''
-        element = f' — {location.element}' if location.element else ''
-        return f'{location.url}{detail}{element}'
+        element = f' — {_code(location.element)}' if location.element else ''
+        return f'{_code(location.url)}{detail}{element}'
     return 'unknown'
+
+
+def _decision(decision: str, reviewer: Optional[str], timestamp: Optional[str], reason: Optional[str] = None) -> str:
+    """'confirmed by ana at 2026-… — reason': who decided, when, and why."""
+    text = decision + (f' by {_inline(reviewer)}' if reviewer else '') + (f' at {_inline(timestamp)}' if timestamp else '')
+    return text + (f' — {_inline(reason)}' if reason else '')
 
 
 def render_markdown(record: ScanRecord) -> str:
     findings = sorted(record.findings, key=lambda finding: SEVERITY_ORDER.index(finding.severity))
     counts = {severity: sum(1 for finding in findings if finding.severity == severity) for severity in SEVERITY_ORDER}
     lines = [
-        f'# Inspection report — {record.target_url}',
+        f'# Inspection report — {_inline(record.target_url)}',
         '',
         f'- Scan ID: `{record.id}`',
         f'- Mode: {record.inspection_mode.value}',
-        f'- Repository: {record.repo_path or "not provided"}',
+        f'- Repository: {_inline(record.repo_path or "not provided")}',
         f'- Started: {record.created_at}',
         f'- Finished: {record.finished_at or "still running"}',
         f'- Limits: {record.options.max_pages} pages, {record.options.timeout_seconds:g}s request timeout',
@@ -183,10 +213,11 @@ def render_markdown(record: ScanRecord) -> str:
     ]
     for module in ModuleName:
         report = record.modules[module]
-        scanned = f'{report.scanned} {report.scanned_label}'.strip() if report.state.value == 'done' else '—'
+        # The label already carries the count ("2 URLs requested, 1 HTML page inspected"); the bare number is the fallback.
+        scanned = (report.scanned_label or str(report.scanned)) if report.state == ModuleState.done else '—'
         duration = f'{report.duration_ms} ms' if report.duration_ms is not None else '—'
         notes = '; '.join([*([f'ERROR: {report.error}'] if report.error else []), *report.notes]) or '—'
-        lines.append(f'| {module.value} | {report.state.value} | {scanned} | {duration} | {notes.replace("|", "/")} |')
+        lines.append(f'| {module.value} | {report.state.value} | {_inline(scanned)} | {duration} | {_inline(notes).replace("|", "/")} |')
 
     commands = [event for event in record.activity if event.kind == ActivityKind.command]
     checks = [event for event in record.activity if event.kind == ActivityKind.check]
@@ -204,38 +235,38 @@ def render_markdown(record: ScanRecord) -> str:
         ]
     )
     for event in commands:
-        lines.extend([f'**{event.message}**', '', _fence(event.output or '(no output)'), ''])
+        lines.extend([f'**{_inline(event.message)}**', '', _fence(event.output or '(no output)'), ''])
     if checks:
         lines.extend(['| Module | Check |', '| --- | --- |'])
-        lines.extend(f'| {event.module.value if event.module else "shared"} | {event.message.replace("|", "/")} |' for event in checks)
+        lines.extend(f'| {event.module.value if event.module else "shared"} | {_inline(event.message).replace("|", "/")} |' for event in checks)
 
     lines.extend(['', '## Findings', ''])
     if not findings:
         lines.append('No findings were reported by the modules that completed.')
     for index, finding in enumerate(findings, start=1):
-        review = finding.review
-        review_text = review.decision.value + (f' by {review.reviewer}' if review.reviewer else '') + (f' — {review.reason}' if review.reason else '')
-        fix_text = finding.fix_review.decision.value if finding.fix_review else 'pending'
+        review, fix = finding.review, finding.fix_review
+        review_text = _decision(review.decision.value, review.reviewer, review.timestamp, review.reason)
+        fix_text = _decision(fix.decision.value, fix.reviewer, fix.timestamp) if fix else 'pending'
         lines.extend(
             [
-                f'### {index}. {finding.title}',
+                f'### {index}. {_inline(finding.title)}',
                 '',
                 f'- Severity: **{finding.severity.value}** · Verification: {finding.verification.value} · Category: {finding.category.value}',
                 f'- Location: {_location(finding)}',
-                f'- Check: {finding.evidence.check or "—"}',
-                f'- Evidence source: {finding.evidence.captured_output or "—"}',
+                f'- Check: {_inline(finding.evidence.check or "—")}',
+                f'- Evidence source: {_code(finding.evidence.captured_output or "—")}',
                 f'- Occurrences: {finding.evidence.occurrences}',
                 *([f'- CWE: {finding.cwe_id}'] if finding.cwe_id else []),
                 f'- Review: {review_text}',
                 f'- Fix review: {fix_text}',
                 '',
-                finding.description_plain,
+                _inline(finding.description_plain),
                 '',
-                f'**Impact:** {finding.impact_plain}',
+                f'**Impact:** {_inline(finding.impact_plain)}',
                 '',
                 _fence(finding.evidence.snippet or '(no excerpt)'),
                 '',
-                *([f'**Suggested fix:** {finding.fix_suggestion.summary}', ''] if finding.fix_suggestion else []),
+                *([f'**Suggested fix:** {_inline(finding.fix_suggestion.summary)}', ''] if finding.fix_suggestion else []),
             ]
         )
     return '\n'.join(lines)

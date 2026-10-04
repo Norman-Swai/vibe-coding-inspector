@@ -7,12 +7,26 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Optional, Pattern, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Pattern, Tuple
 from urllib.parse import urlparse
 
 from ..schemas import ActivityKind, Finding, Location, ModuleName, Severity, Verification
-from .common import CREDENTIAL_FORMATS, AnalyzerResult, Rule, code_only, is_comment_line, mask_secret, new_finding, numbered_lines, plural, truncate
-from .repo import RepoIndex
+from .common import (
+    CREDENTIAL_FORMATS,
+    GENERIC_SECRET,
+    PLACEHOLDER,
+    AnalyzerResult,
+    Rule,
+    Tokens,
+    is_placeholder,
+    mask_secret,
+    new_finding,
+    numbered_lines,
+    plural,
+    tokenize,
+    truncate,
+)
+from .repo import RepoIndex, SourceFile
 from .web import FetchResult
 
 if TYPE_CHECKING:
@@ -200,15 +214,25 @@ SECRET_RULE = Rule(
 SECRET_PATTERNS: List[Tuple[str, Pattern[str], Severity, Verification]] = [
     (label, pattern, Severity.high if label == 'Google API key' else Severity.critical, Verification.confirmed) for label, pattern in CREDENTIAL_FORMATS
 ]
-GENERIC_SECRET = re.compile(
-    r'''(?i)\b([\w.-]*(?:api[_-]?key|secret|token|passw(?:or)?d|pwd|auth[_-]?key|private[_-]?key|client[_-]?secret|access[_-]?key)[\w.-]*)["']?\s*[:=]\s*(["'`])([^"'`\s]{8,})\2'''
-)
-PLACEHOLDER = re.compile(r'(?i)example|sample|placeholder|change[_-]?me|your[_-]|xxxx|\*{3}|<[^>]*>|\$\{|\{\{|process\.env|os\.environ|dummy|redacted|replace|test[_-]?key|^(.)\1+$')
 _SECRET_SKIP_FILES = {'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'poetry.lock', 'Cargo.lock', 'composer.lock', 'Gemfile.lock', 'go.sum'}
 _SECRET_SKIP_SUFFIXES = ('.min.js', '.map', '.svg', '.lock')
 _EXAMPLE_FILE = re.compile(r'(?i)\.(?:example|sample|template|dist)$')
 _ENV_FILE = re.compile(r'^\.env(?:\.[\w-]+)?$')
 _TEST_PATH = re.compile(r'(?:^|/)(?:tests?|__tests__|__mocks__|spec|fixtures?)/|(?:^|/)test_[^/]*\.py$|_test\.(?:py|go)$|\.(?:test|spec)\.[cm]?[jt]sx?$')
+
+TLS_DISABLED = Rule(
+    title='TLS certificate verification disabled',
+    severity=Severity.medium,
+    verification=Verification.confirmed,
+    check='HTTP clients must not disable certificate checks (verify=False, rejectUnauthorized: false, NODE_TLS_REJECT_UNAUTHORIZED=0).',
+    description='The code turns off TLS certificate verification.',
+    impact='Connections can be intercepted by anyone on the network path.',
+    fix='Keep verification on; if you need a private CA, pass its bundle explicitly.',
+    cwe='CWE-295',
+)
+# The environment switch is usually assigned as a string ('0'), which string blanking would hide, so it is matched on the
+# line with only comments removed. Also accepts os.environ["NODE_TLS_REJECT_UNAUTHORIZED"] = "0" and a bare 0; not == or !=.
+_TLS_ENV_DISABLED = re.compile(r'''\bNODE_TLS_REJECT_UNAUTHORIZED[\s"'\]]{0,3}=(?!=)\s*["']?0["']?(?![\w.])''')
 
 SINK_RULES: List[Tuple[Rule, Pattern[str], set]] = [
     (
@@ -269,17 +293,8 @@ SINK_RULES: List[Tuple[Rule, Pattern[str], set]] = [
         PY,
     ),
     (
-        Rule(
-            title='TLS certificate verification disabled',
-            severity=Severity.medium,
-            verification=Verification.confirmed,
-            check='HTTP clients must not disable certificate checks (verify=False, rejectUnauthorized: false, NODE_TLS_REJECT_UNAUTHORIZED=0).',
-            description='The code turns off TLS certificate verification.',
-            impact='Connections can be intercepted by anyone on the network path.',
-            fix='Keep verification on; if you need a private CA, pass its bundle explicitly.',
-            cwe='CWE-295',
-        ),
-        re.compile(r'\bverify\s*=\s*False\b|\brejectUnauthorized\s*:\s*false\b|NODE_TLS_REJECT_UNAUTHORIZED\s*=\s*["\']?0'),
+        TLS_DISABLED,
+        re.compile(r'\bverify\s*=\s*False\b|\brejectUnauthorized\s*:\s*false\b'),
         JS | PY,
     ),
     (
@@ -326,25 +341,32 @@ def secret_scannable(source) -> bool:
     return not (name in _SECRET_SKIP_FILES or name.endswith(_SECRET_SKIP_SUFFIXES) or _ENV_FILE.match(name) or source.text is None)
 
 
-def scan_secrets(repo: RepoIndex) -> List[Finding]:
+def scan_secrets(repo: RepoIndex, found: Optional[List[str]] = None) -> List[Finding]:
+    """Findings for hard-coded secrets. Every raw value is appended to ``found`` so it can be masked wherever else it is quoted."""
     findings: List[Finding] = []
     for source in repo.files:
         name = source.path.name
         if not secret_scannable(source):
             continue
-        allow_generic = not (_EXAMPLE_FILE.search(name) or _TEST_PATH.search(source.rel))
+        fixture = bool(_TEST_PATH.search(source.rel))
+        allow_generic = not (fixture or _EXAMPLE_FILE.search(name))
         for line_no, line in enumerate(source.lines, start=1):
             for label, value, severity, verification in _secrets_in_line(line, allow_generic):
+                if found is not None:
+                    found.append(value)
+                if fixture:
+                    # Credential formats in tests are usually fabricated: still shown, but as a low hypothesis for a person to judge.
+                    severity, verification = Severity.low, Verification.hypothesis
                 masked_line = line.replace(value, mask_secret(value))
                 findings.append(
                     new_finding(
                         MODULE,
                         dataclasses.replace(SECRET_RULE, verification=verification),
-                        title=f'{label} in source code',
+                        title=f'{label} in {"test fixture" if fixture else "source code"}',
                         severity=severity,
                         location=Location(file=source.rel, line_start=line_no, line_end=line_no),
                         snippet=f'L{line_no}: {truncate(masked_line, 200)}',
-                        captured=f'Pattern match in {source.rel} (value masked)',
+                        captured=f'Pattern match in {source.rel} ({"test/fixture path, " if fixture else ""}value masked)',
                     )
                 )
                 if len(findings) >= MAX_SECRET_FINDINGS:
@@ -354,29 +376,32 @@ def scan_secrets(repo: RepoIndex) -> List[Finding]:
 
 def _secrets_in_line(line: str, allow_generic: bool) -> List[Tuple[str, str, Severity, Verification]]:
     hits: List[Tuple[str, str, Severity, Verification]] = []
+    rest = line
     for label, pattern, severity, verification in SECRET_PATTERNS:
         for match in pattern.finditer(line):
-            hits.append((label, match.group(0), severity, verification))
-    if allow_generic and not hits:
-        for match in GENERIC_SECRET.finditer(line):
+            value = match.group(0)
+            rest = rest.replace(value, ' ' * len(value))
+            if not PLACEHOLDER.search(value):
+                hits.append((label, value, severity, verification))
+    if allow_generic:
+        # The rest of the line can still hold a second, differently named secret next to a provider-format one.
+        for match in GENERIC_SECRET.finditer(rest):
             name, value = match.group(1), match.group(3)
-            if PLACEHOLDER.search(value) or value.lower() == name.lower():
-                continue
-            hits.append((f'Possible secret assigned to "{name}"', value, Severity.high, Verification.hypothesis))
+            if not is_placeholder(name, value):
+                hits.append((f'Possible secret assigned to "{name}"', value, Severity.high, Verification.hypothesis))
     return hits
 
 
 def scan_sinks(repo: RepoIndex) -> List[Finding]:
     findings: List[Finding] = []
+    tokens_by_file: Dict[str, Tokens] = {}
     for rule, pattern, suffixes in SINK_RULES:
         for source in repo.with_suffixes(suffixes):
-            if source.text is None or not pattern.search(source.text):
+            if source.text is None or not (pattern.search(source.text) or (rule is TLS_DISABLED and _TLS_ENV_DISABLED.search(source.text))):
                 continue
-            hits = [
-                number
-                for number, line in enumerate(source.lines, start=1)
-                if pattern.search(code_only(line)) and not is_comment_line(line) and not _sink_is_safe(line)
-            ]
+            if source.rel not in tokens_by_file:
+                tokens_by_file[source.rel] = tokenize(source.text, python=source.suffix in PY)
+            hits = _sink_hits(rule, pattern, source, tokens_by_file[source.rel])
             if hits:
                 findings.append(
                     new_finding(
@@ -389,6 +414,16 @@ def scan_sinks(repo: RepoIndex) -> List[Finding]:
                     )
                 )
     return findings
+
+
+def _sink_hits(rule: Rule, pattern: Pattern[str], source: SourceFile, tokens: Tokens) -> List[int]:
+    """Lines where the rule matches real code: string contents and comments are blanked (except for the TLS environment switch)."""
+    hits = []
+    for number, (code, uncommented) in enumerate(zip(tokens.code_lines, tokens.uncommented_lines), start=1):
+        matched = pattern.search(code) or (rule is TLS_DISABLED and _TLS_ENV_DISABLED.search(uncommented))
+        if matched and not _sink_is_safe(source.lines[number - 1]):
+            hits.append(number)
+    return hits
 
 
 def _sink_is_safe(line: str) -> bool:
@@ -575,7 +610,7 @@ def run_security_analysis(context: 'ScanContext') -> AnalyzerResult:
         context.emit(MODULE, ActivityKind.step, 'Repository checks skipped: no repository path was provided')
     else:
         repo = context.repo()
-        secrets = scan_secrets(repo)
+        secrets = scan_secrets(repo, result.secrets)
         result.findings.extend(secrets)
         scannable = sum(1 for source in repo.files if secret_scannable(source))
         context.emit(

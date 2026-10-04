@@ -3,10 +3,10 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, List, Optional, Sequence, Tuple
 
 from ..schemas import ActivityKind, Finding, Location, ModuleName, Severity, Verification
-from .common import AnalyzerResult, Rule, code_only, is_comment_line, new_finding, numbered_lines, plural
+from .common import AnalyzerResult, Rule, Tokens, new_finding, numbered_lines, plural, tokenize
 from .repo import RepoIndex, SourceFile
 
 if TYPE_CHECKING:
@@ -16,6 +16,8 @@ MODULE = ModuleName.static
 JS = {'.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.mts', '.cts', '.vue', '.svelte'}
 PY = {'.py'}
 CODE = JS | PY | {'.java', '.go', '.rb', '.php', '.cs', '.kt', '.swift', '.rs', '.c', '.cc', '.cpp', '.h', '.hpp'}
+# Languages whose comments start with #; everything else is read with C-style // and /* */ comments.
+HASH_COMMENTS = PY | {'.rb'}
 
 UNRESOLVED_IMPORT = Rule(
     title='Import points to a file that does not exist',
@@ -74,19 +76,13 @@ _JS_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.cts', 
 _INTERVAL = re.compile(r'\bsetInterval\s*\(')
 _ADD_LISTENER = re.compile(r'\.addEventListener\s*\(')
 _REMOVE_LISTENER = re.compile(r'\.removeEventListener\s*\(')
-_DEBUGGER = re.compile(r'^\s*debugger\s*;?\s*(?://.*)?$')
-_TODO = re.compile(r'(?:^|\s)(?://|#|/\*|<!--|\*)(?:.*?\W)?(TODO|FIXME|HACK|XXX)\b')
+_DEBUGGER = re.compile(r'^\s*debugger\s*;?\s*$')
+_TODO = re.compile(r'\b(?:TODO|FIXME|HACK|XXX)\b')
 
 
-def _lines_matching(source: SourceFile, pattern: re.Pattern, code: bool = True, keep: Optional[Callable[[str], bool]] = None) -> List[int]:
-    """Line numbers matching ``pattern``. With ``code`` set, comments and string-literal contents are ignored."""
-    numbers = []
-    for number, line in enumerate(source.lines, start=1):
-        if code and is_comment_line(line):
-            continue
-        if pattern.search(code_only(line) if code else line) and (keep is None or keep(line)):
-            numbers.append(number)
-    return numbers
+def _lines_matching(lines: Sequence[str], pattern: re.Pattern, keep: Optional[Callable[[str], bool]] = None) -> List[int]:
+    """1-based numbers of the lines matching ``pattern``; callers pass the code-only or comment-only view of the file."""
+    return [number for number, line in enumerate(lines, start=1) if pattern.search(line) and (keep is None or keep(line))]
 
 
 def _file_finding(rule: Rule, source: SourceFile, lines: List[int], extra: str = '') -> Finding:
@@ -119,26 +115,30 @@ def _py_candidates(base: Path, dots: str, module: str) -> List[Path]:
     return [target.with_name(target.name + '.py'), target / '__init__.py', target]
 
 
-def _relative_imports(source: SourceFile) -> List[re.Match]:
-    """Relative import statements in a JS/TS or Python file, ignoring ones inside comments."""
+def _relative_imports(source: SourceFile, tokens: Tokens) -> List[re.Match]:
+    """Relative import statements in a JS/TS or Python file, ignoring ones inside comments and string literals."""
     pattern = _JS_IMPORT if source.suffix in JS else _PY_RELATIVE_IMPORT if source.suffix in PY else None
     if pattern is None:
         return []
-    lines = source.lines
-    return [match for match in pattern.finditer(source.text or '') if not is_comment_line(lines[source.line_of(match.start()) - 1])]
+    matches = []
+    for match in pattern.finditer(source.text or ''):
+        keyword = match.start() + len(match.group()) - len(match.group().lstrip())  # Python matches start with the indent
+        if tokens.is_code(keyword):
+            matches.append(match)
+    return matches
 
 
-def _unresolved_imports(source: SourceFile) -> Optional[Finding]:
+def _unresolved_imports(source: SourceFile, tokens: Tokens) -> Optional[Finding]:
     base = source.path.parent
     misses: List[Tuple[int, str, List[Path]]] = []
     if source.suffix in JS:
-        for match in _relative_imports(source):
+        for match in _relative_imports(source, tokens):
             spec = match.group(2)
             candidates = _js_candidates(base, spec)
             if not any(candidate.is_file() for candidate in candidates):
                 misses.append((source.line_of(match.start(2)), spec, candidates))
     elif source.suffix in PY:
-        for match in _relative_imports(source):
+        for match in _relative_imports(source, tokens):
             candidates = _py_candidates(base, match.group(1), match.group(2))
             if not (candidates[0].is_file() or candidates[1].is_file() or candidates[2].is_dir()):
                 misses.append((source.line_of(match.start()), match.group(1) + match.group(2), candidates))
@@ -152,18 +152,18 @@ def _unresolved_imports(source: SourceFile) -> Optional[Finding]:
     return _file_finding(UNRESOLVED_IMPORT, source, [line for line, _, _ in misses], 'Not found:\n' + '\n'.join(tried))
 
 
-def _interval_without_clear(source: SourceFile) -> Optional[Finding]:
-    if source.suffix not in JS or 'setInterval' not in (source.text or '') or 'clearInterval' in (source.text or ''):
+def _interval_without_clear(source: SourceFile, tokens: Tokens) -> Optional[Finding]:
+    if source.suffix not in JS or 'setInterval' not in tokens.code or 'clearInterval' in tokens.code:
         return None
-    lines = _lines_matching(source, _INTERVAL)
+    lines = _lines_matching(tokens.code_lines, _INTERVAL)
     return _file_finding(INTERVAL_WITHOUT_CLEAR, source, lines, 'clearInterval: not called anywhere in this file') if lines else None
 
 
-def _listeners_without_remove(source: SourceFile) -> Optional[Finding]:
-    if source.suffix not in JS or 'addEventListener' not in (source.text or ''):
+def _listeners_without_remove(source: SourceFile, tokens: Tokens) -> Optional[Finding]:
+    if source.suffix not in JS or 'addEventListener' not in tokens.code:
         return None
-    added = _lines_matching(source, _ADD_LISTENER, keep=lambda line: 'once' not in line and 'signal' not in line)
-    removed = _lines_matching(source, _REMOVE_LISTENER)
+    added = _lines_matching(tokens.code_lines, _ADD_LISTENER, keep=lambda line: 'once' not in line and 'signal' not in line)
+    removed = _lines_matching(tokens.code_lines, _REMOVE_LISTENER)
     if len(added) <= len(removed):
         return None
     return _file_finding(
@@ -171,15 +171,15 @@ def _listeners_without_remove(source: SourceFile) -> Optional[Finding]:
     )
 
 
-def _debugger_statements(source: SourceFile) -> Optional[Finding]:
-    if source.suffix not in JS or 'debugger' not in (source.text or ''):
+def _debugger_statements(source: SourceFile, tokens: Tokens) -> Optional[Finding]:
+    if source.suffix not in JS or 'debugger' not in tokens.code:
         return None
-    lines = _lines_matching(source, _DEBUGGER)
+    lines = _lines_matching(tokens.code_lines, _DEBUGGER)
     return _file_finding(DEBUGGER_STATEMENT, source, lines) if lines else None
 
 
-def _todo_markers(source: SourceFile) -> Optional[Finding]:
-    lines = _lines_matching(source, _TODO, code=False)
+def _todo_markers(source: SourceFile, tokens: Tokens) -> Optional[Finding]:
+    lines = _lines_matching(tokens.comment_lines, _TODO)
     return _file_finding(TODO_MARKERS, source, lines) if lines else None
 
 
@@ -202,16 +202,19 @@ def analyse_repo_with_stats(repo: RepoIndex) -> Tuple[List[Finding], int, List[s
     findings: List[Finding] = []
     sources = [source for source in repo.with_suffixes(CODE) if source.text is not None]
     per_rule: dict = {rule.title: ([], 0) for _, rule in CHECKS}
+    imports = 0
     for source in sources:
+        # Strings and comments are blanked once per file; every check reads that view, so none of them fires inside a docstring.
+        tokens = tokenize(source.text or '', python=source.suffix in HASH_COMMENTS)
+        imports += len(_relative_imports(source, tokens))
         for check, rule in CHECKS:
-            finding = check(source)
+            finding = check(source, tokens)
             if finding:
                 findings.append(finding)
                 files, hits = per_rule[rule.title]
                 per_rule[rule.title] = ([*files, source.rel], hits + finding.evidence.occurrences)
     js = [source for source in sources if source.suffix in JS]
     py = [source for source in sources if source.suffix in PY]
-    imports = sum(len(_relative_imports(source)) for source in js + py)
     unresolved = per_rule[UNRESOLVED_IMPORT.title][1]
     stats = [
         f'Files read: {len(sources)} ({len(js)} JS/TS, {len(py)} Python, {len(sources) - len(js) - len(py)} other)',

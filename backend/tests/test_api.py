@@ -1,11 +1,30 @@
 import json
+import re
 import socket
 import time
+from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app import app
+from backend.app import app, render_markdown
+from backend.schemas import (
+    Evidence,
+    Finding,
+    FixReviewDecision,
+    FixReviewState,
+    FixSuggestion,
+    InspectionMode,
+    Location,
+    ModuleName,
+    ModuleReport,
+    ModuleState,
+    ReviewDecision,
+    ReviewState,
+    ScanRecord,
+    Severity,
+    Verification,
+)
 
 from .helpers import page, write_files
 
@@ -99,6 +118,91 @@ def test_review_rules_are_enforced_by_the_api(site):
     escalated = client.patch(f'/api/findings/{finding_id}/review', json={'decision': 'escalated', 'reason': 'needs owner'}).json()
     assert escalated['review']['reason'] == 'needs owner'
     assert escalated['fix_review']['decision'] == 'pending'
+
+
+def test_review_timestamps_are_set_by_the_server_and_shown_in_the_report(site):
+    site.add('/', page('<input name="q">'))
+    scan_id = wait(start(site.url + '/'))['id']
+    finding_id = client.get(f'/api/scans/{scan_id}/findings').json()[0]['id']
+    before = datetime.now(timezone.utc)
+
+    review = client.patch(f'/api/findings/{finding_id}/review', json={'decision': 'confirmed', 'reviewer': 'ana', 'timestamp': '1999-01-01T00:00:00+00:00'}).json()['review']
+    fix = client.patch(f'/api/findings/{finding_id}/fix-review', json={'decision': 'approved', 'reviewer': 'bo'}).json()['fix_review']
+
+    assert datetime.fromisoformat(review['timestamp']) >= before
+    assert datetime.fromisoformat(fix['timestamp']) >= datetime.fromisoformat(review['timestamp'])
+    markdown = client.get(f'/api/scans/{scan_id}/report').text
+    assert f'- Review: confirmed by ana at {review["timestamp"]}' in markdown
+    assert f'- Fix review: approved by bo at {fix["timestamp"]}' in markdown
+
+
+def test_secrets_found_by_the_scanner_are_masked_in_every_module_and_in_both_reports(site, tmp_path):
+    secret = 'q8f7a6s5d4f3g2h1j0'
+    site.add('/', page('ok'))
+    # The static module quotes the second file; only the secret scanner knows that the bare value in it is a credential.
+    repo = write_files(tmp_path, {'src/config.js': f'const apiKey = "{secret}";\n', 'src/poll.js': f'setInterval(() => poll("{secret}"), 1000); // TODO rotate\n'})
+
+    scan_id = wait(start(site.url + '/', str(repo)))['id']
+
+    findings = client.get(f'/api/scans/{scan_id}/findings').json()
+    by_title = {finding['title']: finding for finding in findings}
+    assert 'Possible secret assigned to "apiKey" in source code' in by_title
+    assert by_title['setInterval() without a matching clearInterval()']['evidence']['snippet'].startswith('L1: setInterval(() => poll("q8f•••••• [18 chars]")')
+    assert by_title['Unresolved TODO / FIXME markers']['evidence']['snippet'].startswith('L1: setInterval(() => poll("q8f••••••')
+    assert secret not in json.dumps(findings)
+    assert secret not in client.get(f'/api/scans/{scan_id}/report?format=markdown').text
+    assert secret not in client.get(f'/api/scans/{scan_id}/report?format=json').text
+
+
+def _record(**overrides) -> ScanRecord:
+    base = dict(id='scan-1', target_url='http://127.0.0.1:1/', inspection_mode=InspectionMode.localhost, created_at='2026-10-04T00:00:00+00:00')
+    return ScanRecord(**{**base, 'modules': {module: ModuleReport() for module in ModuleName}, **overrides})
+
+
+def test_markdown_report_escapes_site_text_and_reviewer_input():
+    finding = Finding(
+        id='f1',
+        title='Page has no <title>',
+        category=ModuleName.runtime,
+        severity=Severity.low,
+        verification=Verification.confirmed,
+        source_modules=[ModuleName.runtime],
+        location=Location(url='http://127.0.0.1:1/?q=<b>', line_start=3, element='<input type="text">'),
+        evidence=Evidence(snippet='L3: <input type="text">', captured_output='GET http://127.0.0.1:1/ -> 200 text/html', check='The HTML <head> must contain a <title>.'),
+        description_plain='No <title> was found.',
+        impact_plain='Tabs show the raw URL & nothing else.',
+        fix_suggestion=FixSuggestion(summary='Add a <title>.'),
+        review=ReviewState(decision=ReviewDecision.rejected, reviewer='<b>qa</b>', reason='dup\r\n\n### 99. Injected heading\n<script>x()</script>', timestamp='2026-10-04T12:00:00+00:00'),
+        fix_review=FixReviewState(decision=FixReviewDecision.declined, reviewer='qa', timestamp='2026-10-04T12:01:00+00:00'),
+    )
+
+    markdown = render_markdown(_record(target_url='http://127.0.0.1:1/?<x>', findings=[finding]))
+
+    assert '# Inspection report — http://127.0.0.1:1/?&lt;x&gt;' in markdown
+    assert '### 1. Page has no &lt;title&gt;' in markdown
+    assert re.findall(r'^#+ ', markdown, re.M) == ['# ', '## ', '## ', '## ', '### ']
+    assert '- Location: `http://127.0.0.1:1/?q=<b>` (line 3) — `<input type="text">`' in markdown
+    assert '- Check: The HTML &lt;head&gt; must contain a &lt;title&gt;.' in markdown
+    assert '- Evidence source: `GET http://127.0.0.1:1/ -> 200 text/html`' in markdown
+    assert '- Review: rejected by &lt;b&gt;qa&lt;/b&gt; at 2026-10-04T12:00:00+00:00 — dup  ### 99. Injected heading &lt;script&gt;x()&lt;/script&gt;' in markdown
+    assert '- Fix review: declined by qa at 2026-10-04T12:01:00+00:00' in markdown
+    assert '**Impact:** Tabs show the raw URL &amp; nothing else.' in markdown
+    assert '**Suggested fix:** Add a &lt;title&gt;.' in markdown
+    # Outside code spans and the evidence fence no raw tag is left.
+    outside = re.sub(r'```text\n.*?\n```|`+[^`\n]*`+', '', markdown, flags=re.S)
+    assert '<' not in outside and '>' not in outside
+
+
+def test_markdown_coverage_shows_each_module_label_once():
+    modules = {module: ModuleReport() for module in ModuleName}
+    modules[ModuleName.runtime] = ModuleReport(state=ModuleState.done, scanned=2, scanned_label='2 URLs requested, 1 HTML page inspected', duration_ms=5)
+    modules[ModuleName.static] = ModuleReport(state=ModuleState.done, scanned=3, duration_ms=1, notes=['Excluded <vendor> dirs | more'])
+
+    markdown = render_markdown(_record(modules=modules))
+
+    assert '| runtime | done | 2 URLs requested, 1 HTML page inspected | 5 ms | — |' in markdown
+    assert '| static | done | 3 | 1 ms | Excluded &lt;vendor&gt; dirs / more |' in markdown
+    assert '| security | queued | — | — | — |' in markdown
 
 
 @pytest.mark.parametrize(

@@ -71,3 +71,32 @@ def test_vendor_directories_and_comments_are_skipped(tmp_path):
     )
     assert titles(findings) == ['debugger statement left in code']
     assert findings[0].location.file == 'src/app.js'
+
+
+def test_strings_docstrings_and_comments_never_trigger_code_checks_and_todos_only_count_in_comments(tmp_path):
+    findings = scan(
+        tmp_path,
+        {
+            'src/app.js': (
+                'const banner = `\n'
+                "import x from './nope-in-string';\n"
+                'setInterval(tick, 1);\n'
+                '`;\n'
+                'const s = "some text # TODO not a comment";\n'
+                '/* FIXME: block comment\n'
+                ' * debugger;\n'
+                ' */\n'
+                '// TODO: line comment\n'
+                "import real from './missing';\n"
+            ),
+            'src/tool.py': '"""Docstring.\nfrom .nope import thing\n"""\nfrom .also_missing import other  # TODO later\n',
+        },
+    )
+    unresolved, todo = 'Import points to a file that does not exist', 'Unresolved TODO / FIXME markers'
+    by_key = {(f.location.file, f.title): f for f in findings}
+
+    assert set(by_key) == {('src/app.js', unresolved), ('src/app.js', todo), ('src/tool.py', unresolved), ('src/tool.py', todo)}
+    assert (by_key[('src/app.js', unresolved)].location.line_start, by_key[('src/app.js', unresolved)].evidence.occurrences) == (10, 1)
+    assert by_key[('src/app.js', todo)].evidence.snippet.splitlines() == ['L6: /* FIXME: block comment', 'L9: // TODO: line comment']
+    assert by_key[('src/tool.py', unresolved)].location.line_start == 4
+    assert by_key[('src/tool.py', todo)].location.line_start == 4

@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Callable, Dict, Iterable, List, Optional, TypeVar
 
-from .analyzers.common import AnalyzerResult, ScanError
+from .analyzers.common import AnalyzerResult, ScanError, mask_finding
 from .analyzers.compliance import run_compliance_analysis
 from .analyzers.runtime import run_runtime_analysis
 from .analyzers.security import run_security_analysis
@@ -150,6 +150,8 @@ class InspectionOrchestrator:
                 ]
             ),
         )
+        # Raw secret values the security module finds, shared by every module's result step (read and extended under the store lock only).
+        secrets: List[str] = []
         try:
             with ThreadPoolExecutor(max_workers=len(self.analyzers), thread_name_prefix='module') as pool:
                 for module, analyzer in self.analyzers.items():
@@ -158,7 +160,7 @@ class InspectionOrchestrator:
                         self._set_report(scan_id, module, ModuleReport(state=ModuleState.skipped, notes=[skip_reason]))
                         context.emit(module, ActivityKind.step, f'{module.value} skipped: {skip_reason}')
                     else:
-                        pool.submit(self._run_module, scan_id, module, analyzer, context)
+                        pool.submit(self._run_module, scan_id, module, analyzer, context, secrets)
         finally:
             context.close()
             total = self.store.read(scan_id, lambda r: len(r.findings))
@@ -176,7 +178,7 @@ class InspectionOrchestrator:
             return 'No repository path was provided, so source code was not analysed.'
         return None
 
-    def _run_module(self, scan_id: str, module: ModuleName, analyzer: AnalyzerFn, context: ScanContext) -> None:
+    def _run_module(self, scan_id: str, module: ModuleName, analyzer: AnalyzerFn, context: ScanContext, secrets: List[str]) -> None:
         report = ModuleReport(state=ModuleState.running, started_at=_now())
         self._set_report(scan_id, module, report)
         context.emit(module, ActivityKind.step, f'{module.value} module started')
@@ -204,7 +206,11 @@ class InspectionOrchestrator:
         report.notes = result.notes
 
         def apply(record: ScanRecord) -> None:
+            secrets.extend(result.secrets)
             record.findings = deduplicate([*record.findings, *result.findings])
+            # Secrets found by the security module are masked in every module's findings, whichever module finished last.
+            if secrets:
+                record.findings = [mask_finding(finding, secrets) for finding in record.findings]
             record.modules[module] = report
 
         self.store.mutate(scan_id, apply)
