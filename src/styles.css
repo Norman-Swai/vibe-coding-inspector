@@ -701,7 +701,7 @@ textarea:focus-visible {
   border: 1px solid color-mix(in srgb, var(--tone, var(--muted)) 30%, transparent);
   border-radius: 999px;
   background: color-mix(in srgb, var(--tone, var(--muted)) 12%, transparent);
-  color: var(--tone, var(--muted));
+  color: color-mix(in srgb, var(--tone, var(--muted)) 78%, var(--text));
   font-size: 0.75rem;
   font-weight: 650;
   line-height: 1.6;
@@ -1037,9 +1037,9 @@ textarea:focus-visible {
 .detail-section h4 {
   margin: 0 0 0.5rem;
   color: var(--muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
+  font-variant-caps: all-small-caps;
   letter-spacing: 0.06em;
-  text-transform: uppercase;
 }
 
 .detail-section > p {
@@ -1118,6 +1118,7 @@ textarea:focus-visible {
   top: 0;
   right: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr) auto;
   width: min(26rem, 100%);
   height: 100%;
@@ -1151,6 +1152,7 @@ textarea:focus-visible {
 }
 
 .drawer-footer {
+  flex-wrap: wrap;
   border-top: 1px solid var(--border);
 }
 
@@ -1171,9 +1173,9 @@ textarea:focus-visible {
 .settings-section h3 {
   margin: 0;
   color: var(--muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
+  font-variant-caps: all-small-caps;
   letter-spacing: 0.06em;
-  text-transform: uppercase;
 }
 
 .settings-section > p {
@@ -1513,10 +1515,10 @@ textarea:focus-visible {
 
 .activity-source {
   color: var(--muted);
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   font-weight: 700;
+  font-variant-caps: all-small-caps;
   letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 
 .activity-output {
@@ -1559,9 +1561,9 @@ textarea:focus-visible {
 .data-table th {
   background: var(--surface-2);
   color: var(--muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
+  font-variant-caps: all-small-caps;
   letter-spacing: 0.05em;
-  text-transform: uppercase;
 }
 
 .data-table tr:last-child td {
@@ -1663,6 +1665,35 @@ textarea:focus-visible {
 }
 
 /* ---------- Responsive ---------- */
+/* Touch screens: text-sized controls reach the 44px target too; mouse layouts are unchanged. */
+@media (pointer: coarse) {
+  .segmented-option span {
+    min-height: var(--control-h);
+  }
+
+  .link-button,
+  a.badge,
+  .scan-chip,
+  .brand,
+  .viewnav a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 2.75rem;
+  }
+
+  /* Summaries grow through padding so they keep their disclosure marker. */
+  .module-notes summary,
+  .activity-output summary {
+    min-height: 2.75rem;
+    padding-block: 0.75rem;
+  }
+
+  /* The CWE link grows alone; the badges beside it keep their size. */
+  .tag-row {
+    align-items: center;
+  }
+}
+
 @media (max-width: 1099px) {
   .icon-button-label {
     display: none;
@@ -1750,17 +1781,52 @@ textarea:focus-visible {
   .viewnav a[aria-current='page'] {
     background: none;
     color: var(--accent);
-    box-shadow: inset 0 2px 0 var(--accent);
+    box-shadow: none;
   }
 
+  /* A straight bar: an inset shadow would follow the tab's rounded corners. */
+  .viewnav a[aria-current='page']::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 0;
+    height: 2px;
+    border-radius: 0 0 2px 2px;
+    background: var(--accent);
+  }
+
+  /* Clear of the 18px icon's right edge (9px from the centre). */
   .nav-count {
     position: absolute;
     top: 0.3rem;
-    left: calc(50% + 0.4rem);
+    left: calc(50% + 0.75rem);
   }
 
   .page {
     padding-bottom: calc(5.5rem + env(safe-area-inset-bottom));
+  }
+
+  /* Focused and anchored elements scroll clear of the tab bar (its height plus breathing room). */
+  html {
+    scroll-padding-bottom: calc(3.75rem + env(safe-area-inset-bottom) + 0.5rem);
+  }
+
+  /* The current step wraps to two lines instead of being cut off; its title holds the whole text. */
+  .monitor-now {
+    align-items: flex-start;
+  }
+
+  .monitor-now svg {
+    margin-top: 0.2rem;
+  }
+
+  .monitor-now-text {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 }
 
@@ -1870,10 +1936,10 @@ textarea:focus-visible {
     flex: none;
     color: var(--muted);
     font-family: var(--font-sans);
-    font-size: 0.75rem;
+    font-size: 0.8125rem;
     font-weight: 600;
+    font-variant-caps: all-small-caps;
     text-align: left;
-    text-transform: uppercase;
   }
 }
 
@@ -1901,7 +1967,7 @@ textarea:focus-visible {
   }
 }
 
-/* ---------- Print: the full Markdown report (Report → Print / PDF) ---------- */
+/* ---------- Print: the formatted report (Report → Print / PDF), see PrintReport.tsx ---------- */
 @media print {
   body {
     background: #fff;
@@ -1910,12 +1976,12 @@ textarea:focus-visible {
 
   .topbar,
   .skip-link,
+  .backend-banner,
   .view-header,
   .summary-panel,
   .page > .notice,
   .findings-panel,
-  .report-panel > .panel-header,
-  .report-panel .button-row,
+  .report-panel > :not(.print-report),
   .drawer-root {
     display: none !important;
   }
@@ -1925,15 +1991,114 @@ textarea:focus-visible {
     display: block;
     padding: 0;
     border: 0;
+    background: none;
     box-shadow: none;
   }
 
-  .report-preview {
-    max-height: none;
-    overflow: visible;
-    border: 0;
-    background: none;
-    color: #000;
+  .print-report[hidden] {
+    display: block;
+    font-size: 11pt;
+    line-height: 1.45;
+  }
+
+  .print-report h1 {
+    margin: 0 0 0.75rem;
+    font-size: 18pt;
+    overflow-wrap: anywhere;
+  }
+
+  .print-report h2 {
+    margin: 1.5rem 0 0.5rem;
+    padding-bottom: 0.2rem;
+    border-bottom: 1px solid #000;
+    font-size: 14pt;
+    break-after: avoid;
+  }
+
+  .print-report h3 {
+    margin: 0 0 0.5rem;
+    font-size: 12pt;
+    overflow-wrap: anywhere;
+    break-after: avoid;
+  }
+
+  .print-report p {
+    margin: 0 0 0.5rem;
+  }
+
+  .print-report ul {
+    margin: 0;
+    padding-left: 1.1rem;
+  }
+
+  .print-facts {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 0.2rem 1rem;
+    margin: 0 0 0.75rem;
+    break-inside: avoid;
+  }
+
+  .print-facts > div {
+    display: contents;
+  }
+
+  .print-facts dt {
+    color: #444;
+  }
+
+  .print-facts dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .print-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 10pt;
+  }
+
+  .print-table th,
+  .print-table td {
+    padding: 0.3rem 0.5rem;
+    border: 1px solid #999;
+    text-align: left;
+    vertical-align: top;
+  }
+
+  .print-table thead th {
+    background: #eee;
+  }
+
+  .print-table tr {
+    break-inside: avoid;
+  }
+
+  .print-table p {
+    margin: 0;
+  }
+
+  .print-error {
+    color: #b00;
+    font-weight: 600;
+  }
+
+  .print-finding {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid #ccc;
+  }
+
+  .print-excerpt {
+    margin: 0 0 0.75rem;
+    padding: 0.5rem 0.65rem;
+    border: 1px solid #999;
+    background: #f4f4f4;
+    font-family: var(--font-mono);
+    font-size: 9pt;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 }
 

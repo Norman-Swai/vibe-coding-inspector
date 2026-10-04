@@ -112,7 +112,10 @@ export function ScanMonitor({
         <p className="monitor-now">
           <ActivityIcon size={14} aria-hidden="true" />
           <span className="visually-hidden">Currently: </span>
-          <span className="monitor-now-text">{redactSecrets(scan.last_activity)}</span>
+          {/* Narrow screens clamp the line; the title keeps the whole step reachable. */}
+          <span className="monitor-now-text" title={redactSecrets(scan.last_activity)}>
+            {redactSecrets(scan.last_activity)}
+          </span>
         </p>
       )}
       {error && <ErrorNotice>{error}</ErrorNotice>}

@@ -202,6 +202,16 @@ describe('scanning indicator', () => {
     expect(screen.getByText(/1 of 4 modules finished/)).toBeInTheDocument();
     expect(screen.getByText('$ npm audit --json → exit 0, 0 vulnerable packages')).toBeInTheDocument();
   });
+
+  it('keeps the whole current step reachable through its title, since phones clamp the line', async () => {
+    window.location.hash = '#/launch';
+    const step = 'Parsed /privacy: 0 links, 0 new same-origin URLs queued ?token=abcdef123456';
+    useCompletedScan({ status: 'running', finished_at: null, last_activity: step });
+    render(<App />);
+    const now = await screen.findByText(/Parsed \/privacy/);
+    expect(now).toHaveAttribute('title', now.textContent);
+    expect(now.textContent).not.toContain('abcdef123456');
+  });
 });
 
 describe('announcements and focus', () => {

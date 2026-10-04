@@ -1,19 +1,19 @@
 import { Eye, EyeOff, FileDown, FileJson, Printer } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { apiClient, type ReportFormat } from '../api/client';
-import type { ScanStatusResponse } from '../contracts/finding';
+import type { Finding, ScanStatusResponse } from '../contracts/finding';
 import { downloadText } from '../lib/download';
+import { PrintReport } from './PrintReport';
 import { ErrorNotice, Panel } from './ui';
 
-export function ReportPanel({ scan, findingsVersion }: { scan: ScanStatusResponse | null; findingsVersion: unknown }) {
+export function ReportPanel({ scan, findings }: { scan: ScanStatusResponse | null; findings: Finding[] }) {
   const [preview, setPreview] = useState<string | null>(null);
   const [showPreview, setShowPreview] = useState(false);
   const [busy, setBusy] = useState<ReportFormat | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [printRequested, setPrintRequested] = useState(false);
 
   // Any change to the scan or a review decision makes a loaded preview stale.
-  useEffect(() => setPreview(null), [scan?.id, scan?.status, findingsVersion]);
+  useEffect(() => setPreview(null), [scan?.id, scan?.status, findings]);
   useEffect(() => {
     if (!showPreview || preview !== null || !scan) return;
     let cancelled = false;
@@ -29,13 +29,6 @@ export function ReportPanel({ scan, findingsVersion }: { scan: ScanStatusRespons
       cancelled = true;
     };
   }, [showPreview, preview, scan]);
-
-  // Printing uses the full Markdown report (print styles hide everything else), so load it first.
-  useEffect(() => {
-    if (!printRequested || preview === null) return;
-    setPrintRequested(false);
-    requestAnimationFrame(() => window.print());
-  }, [printRequested, preview]);
 
   async function save(format: ReportFormat) {
     if (!scan) return;
@@ -73,15 +66,8 @@ export function ReportPanel({ scan, findingsVersion }: { scan: ScanStatusRespons
         <button type="button" className="button button-ghost" disabled={!scan} aria-expanded={showPreview} onClick={() => setShowPreview((value) => !value)}>
           {showPreview ? <EyeOff size={16} aria-hidden="true" /> : <Eye size={16} aria-hidden="true" />} {showPreview ? 'Hide preview' : 'Preview'}
         </button>
-        <button
-          type="button"
-          className="button button-ghost"
-          disabled={!scan}
-          onClick={() => {
-            setShowPreview(true);
-            setPrintRequested(true);
-          }}
-        >
+        {/* Prints the formatted report below, built from the data already here (print styles hide everything else). */}
+        <button type="button" className="button button-ghost" disabled={!scan} onClick={() => window.print()}>
           <Printer size={16} aria-hidden="true" /> Print / PDF
         </button>
       </div>
@@ -91,6 +77,7 @@ export function ReportPanel({ scan, findingsVersion }: { scan: ScanStatusRespons
           {preview ?? 'Loading…'}
         </pre>
       )}
+      {scan && <PrintReport scan={scan} findings={findings} />}
     </Panel>
   );
 }

@@ -94,7 +94,7 @@ export function FindingsView({
         <>
           <FindingsSummary scan={scan} findings={findings} />
           <FindingsPanel scan={scan} findings={findings} ui={ui} onUiChange={onUiChange} onFindingUpdated={onFindingUpdated} />
-          <ReportPanel scan={scan} findingsVersion={findings} />
+          <ReportPanel scan={scan} findings={findings} />
         </>
       )}
     </>
