@@ -1,43 +1,71 @@
 # Vibe Coding Inspector
 
-This project implements Vibe Coding Inspector, a modular inspection system for websites and webpages using an orchestrated workflow derived from the loaded runtime, static-analysis, security, compliance, frontend, and backend skill definitions.
+Vibe Coding Inspector inspects a running web app, and optionally its source code, for runtime, static-code, security
+and compliance issues. Every finding is backed by evidence a reviewer can check: where it is, what was checked, and
+the exact excerpt that was observed.
+
+## Views
+
+| View | What it is for |
+| --- | --- |
+| **Overview** | What the inspector does, how to use it, what each module checks, modes and safety. |
+| **Launch** | Enter the target and start a scan; a live monitor shows each module's progress, elapsed time and the step currently running. A "Scanning n/4" chip in the header (and a spinner on the Launch tab) shows progress from every view, and starts/finishes are announced to screen readers. |
+| **Analytics** | What was actually done: scan parameters, a filterable activity timeline of every HTTP request, every check with its result and every command (`npm audit`) with its exit code and output, coverage per module, and a network table. The log can be downloaded. |
+| **Findings** | A summary (observed vs. hypotheses, review progress, per module), every observation with its artifacts (captured excerpt, the request it came from, the check that was run) and a "Trace in Analytics" link to the activity that produced it, review controls, and report export. |
+
+Views are hash routes (`#/overview`, `#/launch`, `#/analytics`, `#/findings`), so Back/Forward and bookmarks work. The
+current scan, the launch form and the findings selection survive switching views and reloading. On phones the views
+become a bottom tab bar.
 
 ## What it does
 
-- inspects a target URL in either authorized localhost mode or passive public-readonly mode
-- optionally inspects a local source repository for static and secret findings
-- aggregates runtime, static, security, and compliance findings into a shared schema
-- exposes a backend API for scan lifecycle, findings review, fix review, and report export
-- provides a React dashboard for inspection launch, progress tracking, finding review, and report preview
+- crawls a target URL in **authorised localhost** mode (can also read a local repository) or **public read-only** mode
+  (passive HTTP only, respects `robots.txt`, never reads source code)
+- runs four modules concurrently and reports per-module coverage: state, duration, what was scanned, notes, and the
+  error if a module failed (a failed module never shows up as "0 issues")
+- shows evidence first for every finding, separates directly observed issues from pattern-based *hypotheses*, and
+  masks secrets in the UI and in exports
+- supports human review: confirm / reject / escalate (reject and escalate require a reason, enforced by the API) and a
+  fix-approval step that is only available for confirmed findings and never changes code automatically
+- exports Markdown and JSON reports with coverage, evidence and review decisions; **Print / PDF** prints the same report
+  formatted for paper (coverage, what was done, every finding with its artifacts and decisions)
 
-## Safety model
+## What each module checks
 
-- localhost mode supports deeper inspection but still stays read-oriented
-- public-readonly mode is limited to passive HTTP inspection without repo-dependent deep analysis
-- evidence is rendered as plain text in the UI
-- secrets are masked in displayed evidence
-- fix approval is gated behind confirmed findings and never auto-applies a patch
+| Module | Checks (each finding includes the evidence listed) |
+| --- | --- |
+| Runtime | Broken links and error responses (status line + the page and HTML line that links to it); visible stack traces or error text; missing `<title>`, `lang`, viewport meta; unlabelled form controls; images without `alt`; mixed content. Site-wide issues are grouped into one finding listing every page/element. |
+| Static code | Relative imports (JS/TS and Python) that point to files that do not exist, listing the paths tried; `setInterval` without `clearInterval`; listeners added without removal; `debugger` statements; TODO/FIXME markers. Comments and string literals are ignored. |
+| Security | Missing CSP, framing protection (accepts CSP `frame-ancestors`), `nosniff`, HSTS (https only); plain HTTP on public sites; version-revealing headers; wildcard CORS with credentials; cookies missing `HttpOnly`/`SameSite`/`Secure`; hard-coded secrets (provider formats plus quoted secret-like assignments, placeholders ignored, values masked); `eval`, `new Function`, HTML injection sinks, `shell=True`, disabled TLS verification, `pickle`; `.env` files that are not git-ignored; `npm audit` (or a note saying why it did not run). |
+| Compliance | Privacy policy, terms, contact and about links searched across every crawled page (the evidence lists the pages and links inspected); cookie consent is only required when cookies or known trackers are actually observed. |
 
-## Architecture
+The runtime module is passive HTTP + HTML inspection: JavaScript is not executed, so client-rendered content and console
+errors are not captured. The coverage notes say so on every scan.
 
-- `backend/app.py`: FastAPI service and REST API
-- `backend/orchestrator.py`: scan lifecycle, status tracking, deduplication, reporting
-- `backend/analyzers/runtime.py`: passive crawl, title/form/runtime-state heuristics
-- `backend/analyzers/static_analysis.py`: repo heuristics for lifecycle and code smells
-- `backend/analyzers/security.py`: security headers, secret scanning, optional npm audit ingestion
-- `backend/analyzers/compliance.py`: trust/legal page discovery checks
-- `src/App.tsx`: frontend dashboard
-- `src/api/client.ts`: single frontend API adapter
-- `src/contracts/finding.ts`: shared client contract mirroring backend schema
+## Settings
+
+All preferences live in one **Settings** drawer (gear icon, top right), apply immediately and persist in the browser:
+
+- **Theme**: System / Light / Dark (System follows the OS and updates live)
+- **Density**: Comfortable / Compact (touch screens keep 44 px targets either way)
+- **Motion**: Follow system / Reduce
+- **Reviewer name**: recorded with every review and fix decision
+- **Scan limits**: max pages to crawl (1–50) and request timeout (1–60 s), sent with each scan and enforced by the backend
+
+The launch form shows the current limits with a link to change them rather than repeating the controls.
 
 ## Run
 
 ### Backend
 
 ```bash
-PIP_USER=0 /workspace/venv/bin/pip install -r /workspace/backend/requirements.txt
-/workspace/venv/bin/uvicorn backend.app:app --reload --host 127.0.0.1 --port 8000
+python -m venv .venv && . .venv/bin/activate
+pip install -r backend/requirements.txt
+uvicorn backend.app:app --reload --host 127.0.0.1 --port 8000
 ```
+
+The API only accepts cross-origin requests from the Vite dev server (`http://localhost:5173`, `http://127.0.0.1:5173`).
+Override with `INSPECTOR_CORS_ORIGINS` (comma-separated) if you serve the UI elsewhere.
 
 ### Frontend
 
@@ -46,11 +74,68 @@ npm install
 npm run dev
 ```
 
-The frontend dev server proxies `/api` to `http://127.0.0.1:8000`.
+The dev server proxies `/api` to `http://127.0.0.1:8000`. Try it against the bundled sample site:
+`cd tmp_test_site && python -m http.server 8765`, then scan `http://localhost:8765/` with repository path
+`<this repo>/tmp_test_repo`.
+
+## Troubleshooting
+
+- **A red "inspector API" banner, or a page that used to go blank after updating.** The backend answering on port 8000
+  is older than the UI (it was not restarted after `git pull`, or it runs from another checkout). Stop it and start it
+  again from this repository's folder: `uvicorn backend.app:app --reload --host 127.0.0.1 --port 8000`. The banner
+  clears by itself within a few seconds. Check with `curl http://127.0.0.1:8000/api/health`; it must report
+  `"api_version": 2`.
+- **"Not reachable".** Nothing is listening on 127.0.0.1:8000; start the backend as above.
+- **A view shows "This view could not be displayed".** Use *Forget the current scan*, then start a new scan; if it keeps
+  happening, the backend and UI versions differ (see the first point).
+- After switching branches run `npm install` again, and hard-refresh the browser (Cmd/Ctrl+Shift+R).
+
+## Tests
+
+```bash
+pip install -r backend/requirements-dev.txt
+python -m pytest -q          # backend: analyzers run against a local HTTP fixture server
+npm test                     # frontend: settings, launch form, findings, polling
+npm run build                # type-check + production build
+```
+
+## Architecture
+
+- `backend/app.py`: FastAPI service, request validation, Markdown/JSON report rendering
+- `backend/orchestrator.py`: scan store, concurrent module execution, coverage reports, deduplication
+- `backend/context.py`: per-scan shared state (one crawl, one repository index, single-flight HTTP cache) and the
+  activity recorder
+- `backend/analyzers/web.py`: HTTP fetcher (each URL fetched once per scan) and breadth-first, concurrent crawler
+- `backend/analyzers/repo.py`: repository index that skips vendor/build directories and large or binary files
+- `backend/analyzers/common.py`: finding factory and evidence formatting shared by all modules
+- `backend/analyzers/{runtime,static_analysis,security,compliance}.py`: the four modules
+- `src/App.tsx`: app shell (header, view navigation, live announcements, state that outlives a view)
+- `src/views/`: the four views; `src/components/`: panels (scan monitor, activity log, network table, findings) and
+  shared UI primitives (`ui.tsx`)
+- `src/hooks/useHashRoute.ts`: view routing; `src/hooks/useScan.ts`: polling that applies status, activity and findings
+  together and stops when the scan completes
+- `src/lib/settings.tsx`: settings model, persistence and appearance; `src/lib/meta.ts`: labels, icons, formatting
+- `src/api/client.ts`: the single frontend API adapter; `src/contracts/finding.ts`: mirrors `backend/schemas.py`
+
+## API
+
+- `POST /api/scans` — `{target_url, repo_path?, authorization_confirmed, inspection_mode, max_pages?, timeout_seconds?}`
+- `GET /api/scans/{scan_id}` — status, options, per-module reports (`modules`) and summary counts
+- `GET /api/health` — `{"status": "ok", "version": "0.2.0", "api_version": 2}`; the UI checks it before starting scans
+- `GET /api/scans/{scan_id}/findings`
+- `GET /api/scans/{scan_id}/activity?since=<seq>` — events after `seq`: requests, checks, commands and their output
+- `PATCH /api/findings/{finding_id}/review` — reason required for `rejected` / `escalated`
+- `PATCH /api/findings/{finding_id}/fix-review` — `approved` requires a confirmed finding
+- `GET /api/scans/{scan_id}/report?format=markdown|json` — `text/markdown` or `application/json`
+
+Each finding's `evidence` contains `snippet` (the observed excerpt), `captured_output` (how it was obtained, e.g. the
+request and response status), `check` (the rule that was evaluated) and `occurrences`.
+
+Activity events are bounded (message, output and URL lengths, plus a per-scan size budget; anything beyond is counted as
+`dropped`) and credential-shaped values, including secret-looking URL query parameters, are masked before they are
+stored, so they never reach the UI, the downloaded log or the reports. Recording activity can never fail a scan.
 
 ## Create a new GitHub repository and push
-
-Use the helper script:
 
 ```bash
 chmod +x scripts/create_github_repo_and_push.sh
@@ -61,22 +146,10 @@ GITHUB_TOKEN=your_github_token ./scripts/create_github_repo_and_push.sh \
   --message "Initial commit"
 ```
 
-Requirements:
-- `git` installed
-- `GITHUB_TOKEN` with repository creation permissions
-- local `git config user.name` and `git config user.email` already set
+Requires `git`, a `GITHUB_TOKEN` with repository creation permissions, and `git config user.name` / `user.email`.
 
-## API
+## Limitations
 
-- `POST /api/scans`
-- `GET /api/scans/{scan_id}`
-- `GET /api/scans/{scan_id}/findings`
-- `PATCH /api/findings/{finding_id}/review`
-- `PATCH /api/findings/{finding_id}/fix-review`
-- `GET /api/scans/{scan_id}/report?format=markdown|json`
-
-## Important limitations
-
-- the runtime module currently performs passive HTTP + HTML inspection rather than full browser automation
-- client-side console and network capture are represented as extensibility targets, not full Playwright-grade instrumentation yet
-- dependency vulnerability detection currently relies on optional `npm audit` output when a Node project exists
+- no browser automation yet: console errors and client-rendered pages are not inspected
+- scans are kept in memory (last 50) and are lost when the backend restarts
+- dependency checks use `npm audit` and need a `package-lock.json` plus network access

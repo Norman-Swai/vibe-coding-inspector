@@ -2,11 +2,31 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="description" content="Inspect a web app for runtime, code, security and compliance issues, with evidence for every finding." />
+    <meta name="theme-color" content="#f6f7f9" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Vibe Coding Inspector</title>
+    <script>
+      // Apply saved appearance before first paint so the page never flashes the wrong theme.
+      // Mirrors applyAppearance() in src/lib/settings.tsx.
+      (function () {
+        var settings = {};
+        try {
+          settings = JSON.parse(localStorage.getItem('vci-settings-v1') || '{}') || {};
+        } catch (error) {}
+        var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        var theme = settings.theme === 'light' || settings.theme === 'dark' ? settings.theme : dark ? 'dark' : 'light';
+        var root = document.documentElement;
+        root.dataset.theme = theme;
+        root.dataset.density = settings.density === 'compact' ? 'compact' : 'comfortable';
+        root.dataset.motion = settings.motion === 'reduced' ? 'reduced' : 'system';
+        root.style.colorScheme = theme;
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
-  </html>
+</html>
